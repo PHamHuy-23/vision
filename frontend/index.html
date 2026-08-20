@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Retrieval System v2.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        /* Custom scrollbar and sidebar transitions */
+        .sidebar { transform: translateX(100%); transition: transform 0.3s ease-in-out; }
+        .sidebar.open { transform: translateX(0); }
+        .spinner { border: 4px solid rgba(255, 255, 255, 0.1); border-left-color: #3b82f6; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1f2937; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans h-screen flex flex-col overflow-hidden">
+
+    <!-- Header -->
+    <header class="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center z-10 shrink-0">
+        <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">Video Retrieval System 2.0</h1>
+        <div class="flex items-center gap-4">
+            <div id="statsBadge" class="text-sm px-3 py-1 bg-gray-700 rounded-full border border-gray-600">Status: <span class="text-yellow-400">Checking...</span></div>
+            <button id="sidebarToggle" class="relative px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded shadow transition-colors font-semibold">
+                Submission Build
+                <span id="toggleBadgeCount" class="absolute -top-2 -right-2 bg-red-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">0</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="flex-1 flex overflow-hidden relative">
+        <!-- Content Area -->
+        <div id="mainContentArea" class="flex-1 flex flex-col overflow-hidden p-4 relative z-0 transition-all duration-300">
+            <!-- Search Panel -->
+            <div class="bg-gray-800 p-4 rounded-lg border border-gray-700 mb-4 shrink-0 shadow-lg">
+                <form id="searchForm" class="flex flex-wrap gap-4 items-end">
+                    <div class="flex-1 min-w-[200px]">
+                        <label class="block text-sm text-gray-400 mb-1">Search Query (Semantic)</label>
+                        <input id="queryInput" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors" placeholder="Enter natural language to search frames...">
+                    </div>
+                    <div class="w-32">
+                        <label class="block text-sm text-gray-400 mb-1">Video ID Filter</label>
+                        <input id="videoIdInput" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" placeholder="L27_V001">
+                    </div>
+                    <div class="w-24">
+                        <label class="block text-sm text-gray-400 mb-1">Top K</label>
+                        <select id="topKSelect" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500">
+                            <option value="20">20</option>
+                            <option value="50" selected>50</option>
+                            <option value="100">100</option>
+                            <option value="200">200</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-bold h-[42px] transition-colors shadow-lg flex items-center gap-2">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                        Search
+                    </button>
+                </form>
+            </div>
+
+            <!-- Results Meta -->
+            <div class="mb-2 shrink-0 flex justify-between items-center">
+                <div id="resultsCount" class="text-gray-400 text-sm font-medium">Ready to search.</div>
+            </div>
+
+            <!-- Results Grid -->
+            <div class="flex-1 overflow-y-auto pr-2 relative">
+                <div id="spinner" class="hidden absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50">
+                    <div class="spinner"></div>
+                </div>
+                <div id="resultsGrid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 pb-10">
+                    <!-- Cards will be injected here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Submission Sidebar -->
+        <div id="submissionSidebar" class="sidebar absolute top-0 right-0 h-full w-full sm:w-[420px] bg-gray-800 border-l border-gray-700 shadow-2xl z-20 flex flex-col">
+            <div class="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900">
+                <h2 class="font-bold text-lg text-white">Submission Builder</h2>
+                <button id="closeSidebar" class="text-gray-400 hover:text-white text-3xl leading-none">&times;</button>
+            </div>
+            
+            <div class="p-4 flex-1 overflow-y-auto">
+                <!-- Create Query -->
+                <div class="bg-gray-900 p-3 rounded-lg border border-gray-700 mb-6 shadow-inner">
+                    <h3 class="text-sm font-bold text-blue-400 mb-2 uppercase tracking-wide">New Query File</h3>
+                    <div class="flex gap-2">
+                        <input id="newQueryName" type="text" placeholder="Filename (e.g. q-1)" class="flex-1 bg-gray-800 border border-gray-600 rounded px-2 text-sm text-white focus:border-blue-500 outline-none">
+                        <select id="newQueryType" class="bg-gray-800 border border-gray-600 rounded px-2 text-sm text-white font-mono">
+                            <option value="KIS">KIS</option>
+                            <option value="QA">QA</option>
+                            <option value="TRAKE">TRAKE</option>
+                        </select>
+                        <button id="btnCreateQuery" class="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-white font-bold transition-colors">+</button>
+                    </div>
+                </div>
+
+                <!-- Queries List -->
+                <h3 class="text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Saved Queries</h3>
+                <div id="queriesList" class="flex flex-col gap-2 mb-6 min-h-[50px]"></div>
+
+                <!-- Active Query Details -->
+                <div class="border-t border-gray-700 pt-4 mt-2">
+                    <div class="flex justify-between items-center mb-3">
+                        <h3 id="activeQueryTitle" class="text-md font-bold text-blue-400">No Active Query</h3>
+                        <div class="flex gap-2">
+                            <button id="btnForceNewRow" class="text-xs text-green-400 hover:text-green-300 hidden bg-green-400/10 px-2 py-1 rounded border border-green-400/20" onclick="forceNewRow()">+ Tách chuỗi mới</button>
+                            <button id="btnClearQuery" class="text-xs text-red-400 hover:text-red-300 hidden bg-red-400/10 px-2 py-1 rounded">Clear All</button>
+                        </div>
+                    </div>
+                    <div id="activeQueryItems" class="flex flex-col gap-2"></div>
+                </div>
+            </div>
+
+            <div class="p-4 border-t border-gray-700 bg-gray-900 shrink-0">
+                <button id="btnExportZip" class="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded font-bold shadow-lg flex items-center justify-center gap-2 transition-transform active:scale-95">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                    Download submission.zip
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Preview Modal -->
+    <div id="previewModal" class="hidden fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-4 backdrop-blur-sm">
+        <button id="modalClose" class="absolute top-4 right-4 text-white text-5xl hover:text-gray-300 transition-colors">&times;</button>
+        <div class="max-w-6xl w-full flex flex-col items-center">
+            <img id="modalImg" class="max-h-[85vh] object-contain rounded shadow-2xl mb-6" src="" alt="Preview">
+            <div class="text-center bg-gray-900/80 px-6 py-3 rounded-xl border border-gray-700">
+                <h3 id="modalVideoId" class="text-2xl font-bold text-blue-400 mb-1"></h3>
+                <p id="modalDetails" class="text-gray-300 text-lg font-mono"></p>
+                <div class="mt-3 flex gap-2 justify-center">
+                    <button id="btnPlayVideo" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded shadow-lg transition-colors flex items-center gap-2">
+                        <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                        Play Video (Iframe)
+                    </button>
+                </div>
+            </div>
+            <div id="videoContainer" class="w-full max-w-5xl mt-4 hidden bg-black rounded shadow-2xl overflow-hidden aspect-video border border-gray-700">
+                <iframe id="videoIframe" class="w-full h-full" src="" frameborder="0" allow="autoplay; fullscreen" allowfullscreen></iframe>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const PROD_BACKEND_URL = 'http://localhost:8000'; 
+        const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:';
+        const API_BASE = isLocal ? 'http://localhost:8000' : PROD_BACKEND_URL;
+        
+        const searchForm = document.getElementById('searchForm');
+        const queryInput = document.getElementById('queryInput');
+        const videoIdInput = document.getElementById('videoIdInput');
+        const topKSelect = document.getElementById('topKSelect');
+        const resultsGrid = document.getElementById('resultsGrid');
+        const resultsCount = document.getElementById('resultsCount');
+        const spinner = document.getElementById('spinner');
+
+        let appState = { queries: [], activeId: null };
+        let lastResults = [];
+
+        function loadState() {
+            const saved = localStorage.getItem('vrs_submission_v2');
+            if (saved) { try { appState = JSON.parse(saved); } catch(e) {} }
+            renderSidebar();
+        }
+        function saveState() {
+            localStorage.setItem('vrs_submission_v2', JSON.stringify(appState));
+            renderSidebar();
+            if(lastResults.length) renderResults(lastResults);
+        }
+        loadState();
+
+        document.getElementById('sidebarToggle').onclick = () => {
+            document.getElementById('submissionSidebar').classList.add('open');
+            if(window.innerWidth >= 640) document.getElementById('mainContentArea').style.marginRight = '420px';
+            if(window.innerWidth >= 640) document.getElementById('mainContentArea').style.marginRight = '420px';
+        };
+        document.getElementById('closeSidebar').onclick = () => {
+            document.getElementById('submissionSidebar').classList.remove('open');
+            document.getElementById('mainContentArea').style.marginRight = '0';
+        };
+        
+        document.getElementById('modalClose').onclick = () => {
+            document.getElementById('previewModal').classList.add('hidden');
+            document.getElementById('videoIframe').src = ''; // Dừng phát video khi đóng modal
+        };
+        let currentPts = 0;
+        let currentVideoId = '';
+        window.openPreview = (imgSrc, videoId, details, pts) => {
+            currentVideoId = videoId;
+            currentPts = pts || 0;
+            document.getElementById('modalImg').src = imgSrc;
+            document.getElementById('modalVideoId').textContent = videoId;
+            document.getElementById('modalDetails').textContent = details;
+            
+            // Reset modal state
+            document.getElementById('videoContainer').classList.add('hidden');
+            document.getElementById('videoIframe').src = '';
+            document.getElementById('modalImg').style.display = 'block';
+            document.getElementById('previewModal').classList.remove('hidden');
+        };
+
+        document.getElementById('btnPlayVideo').onclick = async () => {
+            const iframe = document.getElementById('videoIframe');
+            iframe.src = '';
+            
+            document.getElementById('modalImg').style.display = 'none';
+            document.getElementById('videoContainer').classList.remove('hidden');
+            
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/video/${currentVideoId}`);
+                if (!res.ok) throw new Error("Video API failed");
+                const data = await res.json();
+                
+                if (data.drive_file_id) {
+                    // Nhúng Google Drive preview (kèm timestamp ở URL)
+                    iframe.src = `https://drive.google.com/file/d/${data.drive_file_id}/preview#t=${currentPts}`;
+                } else {
+                    alert("Không tìm thấy Google Drive File ID cho video này.");
+                }
+            } catch(e) {
+                alert("Lỗi kết nối hoặc video không tồn tại trên server.");
+            }
+        };
+
+        document.getElementById('btnCreateQuery').onclick = () => {
+            const name = document.getElementById('newQueryName').value.trim();
+            const type = document.getElementById('newQueryType').value;
+            if (!name) return alert("Please enter a query filename.");
+            const newQuery = { id: Math.random().toString(36).substr(2,9), name, type, items: [] };
+            appState.queries.push(newQuery);
+            appState.activeId = newQuery.id;
+            document.getElementById('newQueryName').value = '';
+            saveState();
+        };
+
+        window.setActive = id => { appState.activeId = id; saveState(); };
+        window.deleteQuery = id => { appState.queries = appState.queries.filter(q => q.id !== id); if(appState.activeId === id) appState.activeId = null; saveState(); };
+        window.updateQueryName = (id, newName) => { const q = appState.queries.find(x => x.id === id); if(q) { q.name = newName; saveState(); } };
+        window.deleteItem = (qId, idx) => { const q = appState.queries.find(x => x.id === qId); if (q) { q.items.splice(idx, 1); saveState(); } };
+        window.moveItem = (qId, idx, dir) => {
+            const q = appState.queries.find(x => x.id === qId);
+            if (!q) return;
+            const arr = q.items;
+            if (dir === -1 && idx > 0) { [arr[idx], arr[idx-1]] = [arr[idx-1], arr[idx]]; }
+            if (dir === 1 && idx < arr.length - 1) { [arr[idx], arr[idx+1]] = [arr[idx+1], arr[idx]]; }
+            saveState();
+        };
+        window.updateItem = (qId, idx, field, val) => {
+            const q = appState.queries.find(x => x.id === qId);
+            if (!q || !q.items[idx]) return;
+            if (field === 'frames') {
+                q.items[idx][field] = val.split(',').map(x => Math.round(Number(x.trim()))).filter(x => !isNaN(x));
+            } else if (field === 'frame_idx') {
+                q.items[idx][field] = Math.round(Number(val)) || 0;
+            } else if (field === 'answer') {
+                q.items[idx][field] = val.substring(0, 100);
+            } else {
+                q.items[idx][field] = val;
+            }
+            saveState();
+        };
+
+        function renderSidebar() {
+            const activeQ = appState.queries.find(q => q.id === appState.activeId);
+            document.getElementById('toggleBadgeCount').textContent = activeQ ? activeQ.items.length : 0;
+            
+            const list = document.getElementById('queriesList');
+            if (appState.queries.length === 0) {
+                list.innerHTML = `<p class="text-sm text-gray-500 text-center italic">No queries created yet.</p>`;
+            } else {
+                list.innerHTML = appState.queries.map(q => `
+                    <div class="flex items-center gap-2 p-2 rounded cursor-pointer border border-transparent transition-colors ${q.id === appState.activeId ? 'bg-gray-700 border-blue-500' : 'bg-gray-800 hover:border-gray-500'}" onclick="setActive('${q.id}')">
+                        <input class="flex-1 bg-transparent outline-none text-white font-medium" value="${q.name}" onchange="updateQueryName('${q.id}', this.value)" onclick="event.stopPropagation()">
+                        <span class="text-xs bg-gray-900 px-2 py-0.5 rounded text-blue-300 font-bold border border-gray-600">${q.type}</span>
+                        <span class="text-xs text-gray-400 w-12 text-right">${q.items.length}/100</span>
+                        <button class="text-gray-500 hover:text-red-400 px-1 text-lg leading-none" onclick="event.stopPropagation(); deleteQuery('${q.id}')">&times;</button>
+                    </div>
+                `).join('');
+            }
+
+            const itemsContainer = document.getElementById('activeQueryItems');
+            if (!activeQ) {
+                document.getElementById('activeQueryTitle').textContent = "No Active Query";
+                document.getElementById('btnClearQuery').style.display = "none";
+                itemsContainer.innerHTML = "<p class='text-sm text-gray-500'>Create or select a query above to start adding frames.</p>";
+                return;
+            }
+
+            document.getElementById('activeQueryTitle').textContent = activeQ.name;
+            document.getElementById('btnClearQuery').style.display = "block";
+            document.getElementById('btnForceNewRow').style.display = activeQ.type === 'TRAKE' ? "block" : "none";
+            document.getElementById('btnClearQuery').onclick = () => { if(confirm("Clear all items in this query?")) { activeQ.items = []; saveState(); } };
+
+            if (activeQ.items.length === 0) {
+                itemsContainer.innerHTML = "<p class='text-sm text-gray-500 italic'>No frames added yet.</p>";
+                return;
+            }
+
+            itemsContainer.innerHTML = activeQ.items.map((item, idx) => {
+                let inputs = '';
+                if (activeQ.type === 'KIS') {
+                    inputs = `<input value="${item.video_id}" class="w-20 bg-gray-900 text-white border border-gray-600 rounded px-2 py-1 outline-none focus:border-blue-500" onchange="updateItem('${activeQ.id}', ${idx}, 'video_id', this.value)">
+                              <input value="${item.frame_idx}" type="number" class="w-20 bg-gray-900 text-white border border-gray-600 rounded px-2 py-1 outline-none focus:border-blue-500" onchange="updateItem('${activeQ.id}', ${idx}, 'frame_idx', this.value)">`;
+                } else if (activeQ.type === 'QA') {
+                    inputs = `<input value="${item.video_id}" class="w-16 bg-gray-900 text-white border border-gray-600 rounded px-2 py-1 outline-none focus:border-blue-500" onchange="updateItem('${activeQ.id}', ${idx}, 'video_id', this.value)">
+                              <input value="${item.frame_idx}" type="number" class="w-16 bg-gray-900 text-white border border-gray-600 rounded px-2 py-1 outline-none focus:border-blue-500" onchange="updateItem('${activeQ.id}', ${idx}, 'frame_idx', this.value)">
+                              <input value="${item.answer || ''}" placeholder="Answer" class="flex-1 min-w-[50px] bg-gray-900 text-white border border-gray-600 rounded px-2 py-1 outline-none focus:border-blue-500" onchange="updateItem('${activeQ.id}', ${idx}, 'answer', this.value)">`;
+                } else if (activeQ.type === 'TRAKE') {
+                    inputs = `<input value="${item.video_id}" class="w-20 bg-gray-900 text-white border border-gray-600 rounded px-2 py-1 outline-none focus:border-blue-500" onchange="updateItem('${activeQ.id}', ${idx}, 'video_id', this.value)">
+                              <input value="${item.frames.join(', ')}" class="flex-1 min-w-[50px] bg-gray-900 text-white border border-gray-600 rounded px-2 py-1 outline-none focus:border-blue-500 font-mono" onchange="updateItem('${activeQ.id}', ${idx}, 'frames', this.value)">`;
+                }
+                return `
+                <div class="flex items-center gap-2 mb-2 bg-gray-800 p-2 rounded border border-gray-700 text-sm shadow-sm group">
+                    <span class="text-gray-500 text-xs w-4">${idx+1}.</span>
+                    ${inputs}
+                    <div class="flex flex-col gap-0 opacity-50 group-hover:opacity-100 transition-opacity">
+                        <button class="text-gray-400 hover:text-white leading-none text-xs px-1" onclick="moveItem('${activeQ.id}', ${idx}, -1)">▲</button>
+                        <button class="text-gray-400 hover:text-white leading-none text-xs px-1" onclick="moveItem('${activeQ.id}', ${idx}, 1)">▼</button>
+                    </div>
+                    <button class="text-red-400 hover:text-red-300 px-1 text-lg leading-none opacity-50 group-hover:opacity-100 transition-opacity" onclick="deleteItem('${activeQ.id}', ${idx})">&times;</button>
+                </div>`;
+            }).join('');
+        }
+
+        window.forceNewRow = function() {
+            if (!appState.activeId) return;
+            const q = appState.queries.find(x => x.id === appState.activeId);
+            if (q && q.type === 'TRAKE') {
+                if (q.items.length >= 100) return alert("Maximum 100 rows allowed per query.");
+                q.items.push({ video_id: "", frames: [] });
+                saveState();
+            }
+        };
+
+        window.addToActive = function(vid, frame) {
+            if (!appState.activeId) {
+                alert("Please select or create an active query on the right side first.");
+                document.getElementById('submissionSidebar').classList.add('open');
+            if(window.innerWidth >= 640) document.getElementById('mainContentArea').style.marginRight = '420px';
+                return;
+            }
+            const q = appState.queries.find(x => x.id === appState.activeId);
+            if (!q) return;
+
+            const cleanVid = vid.replace(/\.[^/.]+$/, "");
+            const intFrame = Math.round(Number(frame));
+
+            if (q.type === 'KIS' || q.type === 'QA') {
+                if (q.items.length >= 100) return alert("Maximum 100 rows allowed per query.");
+                if (!q.items.find(x => x.video_id === cleanVid && x.frame_idx === intFrame)) {
+                    q.items.push({ video_id: cleanVid, frame_idx: intFrame, answer: '' });
+                }
+            } else if (q.type === 'TRAKE') {
+                const last = q.items[q.items.length - 1];
+                if (last && last.video_id === "") {
+                    last.video_id = cleanVid;
+                    last.frames.push(intFrame);
+                } else if (last && last.video_id === cleanVid) {
+                    if (!last.frames.includes(intFrame)) last.frames.push(intFrame);
+                } else {
+                    if (q.items.length >= 100) return alert("Maximum 100 rows allowed per query.");
+                    q.items.push({ video_id: cleanVid, frames: [intFrame] });
+                }
+            }
+            saveState();
+        };
+
+        document.getElementById('btnExportZip').onclick = async () => {
+            if (appState.queries.length === 0) return alert("No queries to export.");
+            const zip = new JSZip();
+            const folder = zip.folder("submission");
+            appState.queries.forEach(q => {
+                const exportItems = q.items.slice(0, 100);
+                let csv = "";
+                const esc = val => val ? '"' + String(val).replace(/"/g, '""') + '"' : '""';
+                if (q.type === 'KIS') csv = exportItems.map(i => `${i.video_id}, ${i.frame_idx}`).join('\n');
+                else if (q.type === 'QA') csv = exportItems.map(i => `${i.video_id}, ${i.frame_idx}, ${esc(i.answer)}`).join('\n');
+                else if (q.type === 'TRAKE') csv = exportItems.map(i => `${i.video_id}, ${i.frames.join(', ')}`).join('\n');
+                folder.file(`${q.name}.csv`, csv);
+            });
+            const blob = await zip.generateAsync({type:"blob"});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = "submission.zip";
+            document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+        };
+
+        function renderResults(items) {
+            lastResults = items;
+            if (!items || !items.length) {
+                resultsGrid.innerHTML = '<div class="col-span-full text-center py-10 text-gray-500 font-medium">No results found for this query.</div>';
+                return;
+            }
+            const activeQ = appState.queries.find(x => x.id === appState.activeId);
+            
+            resultsGrid.innerHTML = items.map(item => {
+                const fileId = item.gdrive_file_id;
+                const path = item.image_path || "";
+                const fallbackUrl = fileId ? `https://lh3.googleusercontent.com/d/${fileId}` : (path.startsWith('http') ? path : '');
+                const thumbUrl = fileId ? `https://drive.google.com/thumbnail?id=${fileId}&sz=w400` : fallbackUrl;
+                const highResUrl = fileId ? `https://drive.google.com/thumbnail?id=${fileId}&sz=w1200` : fallbackUrl;
+
+                let isAdded = false;
+                if (activeQ) {
+                    const cleanVid = item.video_id.replace(/\.[^/.]+$/, "");
+                    const intFrame = Math.round(Number(item.frame_idx));
+                    if (activeQ.type === 'KIS' || activeQ.type === 'QA') {
+                        isAdded = !!activeQ.items.find(x => x.video_id === cleanVid && x.frame_idx === intFrame);
+                    } else if (activeQ.type === 'TRAKE') {
+                        isAdded = !!activeQ.items.find(x => x.video_id === cleanVid && x.frames.includes(intFrame));
+                    }
+                }
+
+                const displayScore = item.score !== undefined ? `${parseFloat(item.score).toFixed(1)}%` : '';
+
+                return `
+                <div class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden shadow-lg hover:border-blue-500 hover:shadow-blue-500/20 transition-all flex flex-col group">
+                    <div class="relative w-full pt-[56.25%] bg-gray-900 cursor-pointer" onclick="openPreview('${highResUrl}', '${item.video_id}', 'Frame: ${item.frame_idx} | Timestamp: ${item.timestamp} | Similarity: ${displayScore}', ${item.pts_time})">
+                        <img src="${thumbUrl}" class="absolute top-0 left-0 w-full h-full object-contain" loading="lazy" onerror="if('${fallbackUrl}' && this.src!=='${fallbackUrl}'){this.src='${fallbackUrl}'}">
+                        ${displayScore ? `<div class="absolute top-2 left-2 bg-black/80 text-white text-[11px] font-bold px-2 py-0.5 rounded backdrop-blur-sm border border-gray-700">${displayScore}</div>` : ''}
+                        <button class="absolute top-2 right-2 w-8 h-8 rounded flex items-center justify-center font-bold text-lg transition-all shadow-lg border ${isAdded ? 'bg-green-600 text-white border-green-500' : 'bg-black/50 text-white border-gray-500 hover:bg-blue-600 hover:border-blue-500 backdrop-blur-md'}" onclick="event.stopPropagation(); addToActive('${item.video_id}', ${item.frame_idx})" title="Add to Active Query">
+                            ${isAdded ? '✓' : '+'}
+                        </button>
+                    </div>
+
+                    <div class="p-3 flex flex-col gap-2">
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="font-bold text-blue-300 truncate" title="${item.video_id}">${item.video_id}</span>
+                            <span class="text-gray-300 bg-gray-900 px-2 py-0.5 rounded text-xs border border-gray-700 font-mono">Fr:${item.frame_idx}</span>
+                        </div>
+                        <div class="text-[11px] text-gray-400 font-mono flex items-center gap-1">
+                            <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            ${item.timestamp}
+                        </div>
+                        
+                        <div class="grid grid-cols-2 gap-2 mt-1 pt-2 border-t border-gray-700">
+                            <button class="bg-gray-700 hover:bg-blue-600 text-white text-xs py-1.5 rounded transition-colors flex items-center justify-center gap-1 font-medium" onclick="event.stopPropagation(); findSimilar(${item.vector_id})" title="Search for visually similar frames">
+                                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                                Similar
+                            </button>
+                            <button class="bg-gray-700 hover:bg-purple-600 text-white text-xs py-1.5 rounded transition-colors flex items-center justify-center gap-1 font-medium" onclick="event.stopPropagation(); trackContext('${item.video_id}', ${item.frame_idx})" title="Load the next 30 frames of this video">
+                                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7"></path></svg>
+                                Track
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        window.findSimilar = async function(vectorId) {
+            if (vectorId == null) return alert("Vector ID not found for this frame.");
+            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.innerHTML = 'Searching for <span class="text-blue-400">visually similar</span> images...';
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/search/similar`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ vector_id: vectorId, top_k: parseInt(topKSelect.value) || 50 })
+                });
+                const data = await res.json();
+                spinner.style.display = 'none';
+                if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.results.length}</span> visually similar frames.`; }
+            } catch(e) { spinner.style.display = 'none'; resultsCount.textContent = 'Server Connection Error.'; }
+        };
+
+        window.trackContext = async function(videoId, frameIdx) {
+            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.innerHTML = `Tracking next frames in <span class="text-purple-400 font-bold">${videoId}</span>...`;
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/search/context?video_id=${videoId}&frame_idx=${frameIdx}&limit=30`);
+                const data = await res.json();
+                spinner.style.display = 'none';
+                if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Loaded <span class="text-white font-bold">${data.results.length}</span> subsequent frames for ${videoId}.`; }
+            } catch(e) { spinner.style.display = 'none'; resultsCount.textContent = 'Server Connection Error.'; }
+        };
+
+        searchForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const query = queryInput.value.trim();
+            if (!query) return;
+            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.textContent = 'Searching...';
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/search`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        query, top_k: parseInt(topKSelect.value), video_id: videoIdInput.value.trim() || null,
+                        mode: 'semantic', enable_rerank: false
+                    })
+                });
+                const data = await res.json();
+                spinner.style.display = 'none';
+                if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.total_results || data.results.length}</span> results for "<span class="text-blue-400">${query}</span>"`; }
+                else { resultsCount.textContent = `Error: ${data.detail}`; }
+            } catch (err) { spinner.style.display = 'none'; resultsCount.textContent = 'API Connection Error'; }
+        };
+
+        async function loadStats() {
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/health`);
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('statsBadge').innerHTML = `Status: <span class="text-green-400 font-bold">Online</span> | DB: <span class="font-mono">${data.total_keyframes.toLocaleString()}</span>`;
+                }
+            } catch(e) { document.getElementById('statsBadge').innerHTML = `Status: <span class="text-red-400 font-bold">Offline</span>`; }
+        }
+        loadStats();
+    </script>
+</body>
+</html>

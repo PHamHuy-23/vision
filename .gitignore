@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+env/
+.env
+
+# Large Data Files (DO NOT COMMIT TO GITHUB - OVER 100MB LIMIT)
+*.npy
+*.db
+*.json
+
+# Except allow specific config json if any
+!package.json
+
+# Scratch & Patch files (temporary dev files)
+add_new_row.py
+add_video_player.py
+fix_*.py
+patch_*.py
+test_*.py
+debug_search.py
