@@ -19,7 +19,7 @@ Hệ thống được thiết kế tối ưu với giao diện Web (TailwindCSS)
 
 ## 2. Chuẩn bị Dữ liệu (Rất Quan Trọng)
 Mỗi thành viên trong team sau khi Clone Code về cần tải các file Data từ Google Drive chung của Team và đặt vào thư mục gốc của project:
-https://drive.google.com/file/d/1260Y5_SY2z0rWVeoxL-KauBjrEGPG4Dq/view?usp=sharing
+https://drive.google.com/file/d/1oiLUeSKdPydvMrntE5d6W3FUSbDJ93eO/view?usp=sharing
 1. `all_vectors.npy` (~350MB): File chứa toàn bộ vector đã được encode bằng CLIP.
 2. `frame_map_supabase.json` (~177MB): File map metadata (đường dẫn, thời gian, frame_idx) của toàn bộ frame.
 3. `video_drive_metadata.json`: File chứa Google Drive ID của các video để bật Iframe.
