@@ -217,8 +217,14 @@ def search_keyframes(req: SearchRequest):
             video_id_filter=req.video_id,
             enable_rerank=req.enable_rerank
         )
-    elif req.mode == "keyword":
-        results = search_engine.keyword_search(
+    elif req.mode == "object":
+        results = search_engine.exact_object_search(
+            query_text=req.query,
+            top_k=req.top_k,
+            video_id_filter=req.video_id
+        )
+    elif req.mode == "asr":
+        results = search_engine.exact_asr_search(
             query_text=req.query,
             top_k=req.top_k,
             video_id_filter=req.video_id

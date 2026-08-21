@@ -40,8 +40,16 @@
             <div class="bg-gray-800 p-4 rounded-lg border border-gray-700 mb-4 shrink-0 shadow-lg">
                 <form id="searchForm" class="flex flex-wrap gap-4 items-end">
                     <div class="flex-1 min-w-[200px]">
-                        <label class="block text-sm text-gray-400 mb-1">Search Query (Semantic)</label>
-                        <input id="queryInput" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors" placeholder="Enter natural language to search frames...">
+                        <label class="block text-sm text-gray-400 mb-1">Search Query</label>
+                        <input id="queryInput" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors" placeholder="Enter text to search frames...">
+                    </div>
+                    <div class="w-40">
+                        <label class="block text-sm text-gray-400 mb-1">Mode</label>
+                        <select id="searchMode" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors">
+                            <option value="semantic">Semantic AI</option>
+                            <option value="object">Object (Exact)</option>
+                            <option value="asr">ASR (Fuzzy + Synonyms)</option>
+                        </select>
                     </div>
                     <div class="w-32">
                         <label class="block text-sm text-gray-400 mb-1">Video ID Filter</label>
@@ -129,17 +137,32 @@
 
     <!-- Preview Modal -->
     <div id="previewModal" class="hidden fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-4 backdrop-blur-sm">
-        <button id="modalClose" class="absolute top-4 right-4 text-white text-5xl hover:text-gray-300 transition-colors">&times;</button>
-        <div class="max-w-6xl w-full flex flex-col items-center">
-            <img id="modalImg" class="max-h-[85vh] object-contain rounded shadow-2xl mb-6" src="" alt="Preview">
+        <button id="modalClose" class="absolute top-4 right-4 text-white text-5xl hover:text-gray-300 transition-colors z-[60]">&times;</button>
+        
+        <button id="modalPrev" class="hidden absolute left-4 top-1/2 -translate-y-1/2 text-white/50 hover:text-white text-6xl px-4 py-8 transition-colors z-[60]" onclick="navigatePreview(-1)">&lsaquo;</button>
+        <button id="modalNext" class="hidden absolute right-4 top-1/2 -translate-y-1/2 text-white/50 hover:text-white text-6xl px-4 py-8 transition-colors z-[60]" onclick="navigatePreview(1)">&rsaquo;</button>
+
+        <div class="max-w-6xl w-full flex flex-col items-center relative z-50">
+            <div id="previewImageContainer" class="relative inline-block mb-6">
+                <img id="modalImg" class="max-h-[85vh] object-contain rounded shadow-2xl cursor-grab select-none transition-transform duration-200" src="" alt="Preview" draggable="false">
+                <div id="bboxesOverlay" class="absolute top-0 left-0 w-full h-full pointer-events-none overflow-hidden rounded"></div>
+            </div>
             <div class="text-center bg-gray-900/80 px-6 py-3 rounded-xl border border-gray-700">
                 <h3 id="modalVideoId" class="text-2xl font-bold text-blue-400 mb-1"></h3>
                 <p id="modalDetails" class="text-gray-300 text-lg font-mono"></p>
-                <div class="mt-3 flex gap-2 justify-center">
+                <div class="mt-3 flex flex-wrap gap-4 justify-center items-center">
                     <button id="btnPlayVideo" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded shadow-lg transition-colors flex items-center gap-2">
                         <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                         Play Video (Iframe)
                     </button>
+                    <label class="flex items-center gap-2 text-sm font-bold text-red-400 cursor-pointer">
+                        <input type="checkbox" id="toggleObjBbox" class="w-4 h-4 cursor-pointer" checked onchange="drawBboxes()">
+                        Show Objects
+                    </label>
+                    <label class="flex items-center gap-2 text-sm font-bold text-blue-400 cursor-pointer">
+                        <input type="checkbox" id="toggleOcrBbox" class="w-4 h-4 cursor-pointer" checked onchange="drawBboxes()">
+                        Show OCR
+                    </label>
                 </div>
             </div>
             <div id="videoContainer" class="w-full max-w-5xl mt-4 hidden bg-black rounded shadow-2xl overflow-hidden aspect-video border border-gray-700">
@@ -192,19 +215,175 @@
         };
         let currentPts = 0;
         let currentVideoId = '';
-        window.openPreview = (imgSrc, videoId, details, pts) => {
+        let currentPreviewIndex = -1;
+        let currentObjId = '';
+        let currentOcrId = '';
+
+        window.drawBboxes = async () => {
+            const overlay = document.getElementById('bboxesOverlay');
+            overlay.innerHTML = ''; // clear existing
+            const img = document.getElementById('modalImg');
+            
+            // Wait until image is actually loaded to get accurate natural dimensions
+            if (!img.complete || img.naturalWidth === 0) return;
+            
+            const imgW = img.naturalWidth;
+            const imgH = img.naturalHeight;
+
+            if (document.getElementById('toggleObjBbox').checked && currentObjId) {
+                try {
+                    const res = await fetch(`${API_BASE}/api/v1/drive/proxy/${currentObjId}`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        const boxes = data.detection_boxes || [];
+                        const classes = data.detection_class_entities || [];
+                        const scores = data.detection_scores || [];
+                        
+                        boxes.forEach((box, i) => {
+                            const score = parseFloat(scores[i]);
+                            if (score < 0.1) return; // filter low confidence
+                            
+                            const [ymin, xmin, ymax, xmax] = box;
+                            const top = ymin * 100;
+                            const left = xmin * 100;
+                            const height = (ymax - ymin) * 100;
+                            const width = (xmax - xmin) * 100;
+                            
+                            const boxEl = document.createElement('div');
+                            boxEl.className = 'absolute border-[1.5px] border-red-500 bg-red-500/10 pointer-events-none';
+                            boxEl.style.top = `${top}%`;
+                            boxEl.style.left = `${left}%`;
+                            boxEl.style.height = `${height}%`;
+                            boxEl.style.width = `${width}%`;
+                            
+                            const label = document.createElement('span');
+                            label.className = 'text-[9px] bg-red-500 text-white px-1 truncate absolute -top-4 left-[-1.5px] whitespace-nowrap font-sans rounded-t-sm';
+                            label.textContent = `${classes[i]} ${Math.round(score*100)}%`;
+                            
+                            boxEl.appendChild(label);
+                            overlay.appendChild(boxEl);
+                        });
+                    }
+                } catch(e) { console.error("Error drawing obj bboxes", e); }
+            }
+
+            if (document.getElementById('toggleOcrBbox').checked && currentOcrId) {
+                try {
+                    const res = await fetch(`${API_BASE}/api/v1/drive/proxy/${currentOcrId}`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        const detections = data.detections || [];
+                        
+                        detections.forEach((det) => {
+                            const text = det.text;
+                            const bbox = det.bbox; // [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] in absolute pixels
+                            if (!bbox || bbox.length < 4) return;
+                            
+                            const xs = bbox.map(p => p[0]);
+                            const ys = bbox.map(p => p[1]);
+                            const xmin = Math.min(...xs);
+                            const xmax = Math.max(...xs);
+                            const ymin = Math.min(...ys);
+                            const ymax = Math.max(...ys);
+                            
+                            const top = (ymin / imgH) * 100;
+                            const left = (xmin / imgW) * 100;
+                            const height = ((ymax - ymin) / imgH) * 100;
+                            const width = ((xmax - xmin) / imgW) * 100;
+                            
+                            const boxEl = document.createElement('div');
+                            boxEl.className = 'absolute border-[1.5px] border-blue-400 bg-blue-400/20 pointer-events-none';
+                            boxEl.style.top = `${top}%`;
+                            boxEl.style.left = `${left}%`;
+                            boxEl.style.height = `${height}%`;
+                            boxEl.style.width = `${width}%`;
+                            
+                            const label = document.createElement('span');
+                            label.className = 'text-[9px] bg-blue-500 text-white px-1 truncate absolute -bottom-4 left-[-1.5px] whitespace-nowrap font-sans rounded-b-sm';
+                            label.textContent = text;
+                            
+                            boxEl.appendChild(label);
+                            overlay.appendChild(boxEl);
+                        });
+                    }
+                } catch(e) { console.error("Error drawing ocr bboxes", e); }
+            }
+        };
+
+        window.openPreview = (imgSrc, videoId, details, pts, index = -1, objId = "", ocrId = "") => {
             currentVideoId = videoId;
             currentPts = pts || 0;
-            document.getElementById('modalImg').src = imgSrc;
+            currentPreviewIndex = index;
+            currentObjId = objId;
+            currentOcrId = ocrId;
+            
+            const modalImg = document.getElementById('modalImg');
+            document.getElementById('bboxesOverlay').innerHTML = ''; // clear old bboxes
+            
+            // Attach onload to draw bboxes once image has proper dimensions
+            modalImg.onload = drawBboxes;
+            modalImg.src = imgSrc;
+            
+            // Add a small pop animation
+            modalImg.style.transform = 'scale(0.98)';
+            setTimeout(() => { modalImg.style.transform = 'scale(1)'; }, 50);
+
             document.getElementById('modalVideoId').textContent = videoId;
             document.getElementById('modalDetails').textContent = details;
             
             // Reset modal state
             document.getElementById('videoContainer').classList.add('hidden');
             document.getElementById('videoIframe').src = '';
-            document.getElementById('modalImg').style.display = 'block';
+            document.getElementById('previewImageContainer').style.display = 'inline-block';
             document.getElementById('previewModal').classList.remove('hidden');
+            
+            // Update Navigation Buttons visibility
+            const btnPrev = document.getElementById('modalPrev');
+            const btnNext = document.getElementById('modalNext');
+            if (index > 0) btnPrev.classList.remove('hidden'); else btnPrev.classList.add('hidden');
+            if (index !== -1 && index < lastResults.length - 1) btnNext.classList.remove('hidden'); else btnNext.classList.add('hidden');
         };
+
+        window.navigatePreview = (direction) => {
+            if (currentPreviewIndex === -1) return;
+            const newIndex = currentPreviewIndex + direction;
+            if (newIndex >= 0 && newIndex < lastResults.length) {
+                const item = lastResults[newIndex];
+                const fileId = item.gdrive_file_id;
+                const path = item.image_path || "";
+                const fallbackUrl = fileId ? `${API_BASE}/api/v1/drive/proxy/${fileId}` : (path.startsWith('http') ? path : '');
+                const highResUrl = fallbackUrl;
+                const displayScore = item.score !== undefined ? `${parseFloat(item.score).toFixed(1)}%` : '';
+                
+                openPreview(highResUrl, item.video_id, `Frame: ${item.frame_idx} | Timestamp: ${item.timestamp} | Similarity: ${displayScore}`, item.pts_time, newIndex, item.object_file_id || "", item.ocr_json_id || "");
+            }
+        };
+
+        // Swipe & Mouse Drag Logic
+        let touchStartX = 0;
+        let touchEndX = 0;
+        let isDragging = false;
+
+        const handleGesture = () => {
+            const swipeDistance = touchEndX - touchStartX;
+            if (swipeDistance < -50) navigatePreview(1); // Swipe left -> Next
+            if (swipeDistance > 50) navigatePreview(-1); // Swipe right -> Prev
+        };
+
+        modalImg.addEventListener('touchstart', e => { touchStartX = e.changedTouches[0].screenX; }, {passive: true});
+        modalImg.addEventListener('touchend', e => { touchEndX = e.changedTouches[0].screenX; handleGesture(); });
+
+        modalImg.addEventListener('mousedown', e => { isDragging = true; touchStartX = e.clientX; modalImg.classList.add('cursor-grabbing'); });
+        modalImg.addEventListener('mouseup', e => { if (!isDragging) return; isDragging = false; modalImg.classList.remove('cursor-grabbing'); touchEndX = e.clientX; handleGesture(); });
+        modalImg.addEventListener('mouseleave', e => { if (isDragging) { isDragging = false; modalImg.classList.remove('cursor-grabbing'); touchEndX = e.clientX; handleGesture(); } });
+
+        // Keyboard Navigation
+        document.addEventListener('keydown', (e) => {
+            if (!document.getElementById('previewModal').classList.contains('hidden')) {
+                if (e.key === 'ArrowLeft') navigatePreview(-1);
+                else if (e.key === 'ArrowRight') navigatePreview(1);
+            }
+        });
 
         document.getElementById('btnPlayVideo').onclick = async () => {
             const iframe = document.getElementById('videoIframe');
@@ -400,12 +579,12 @@
             }
             const activeQ = appState.queries.find(x => x.id === appState.activeId);
             
-            resultsGrid.innerHTML = items.map(item => {
+            resultsGrid.innerHTML = items.map((item, index) => {
                 const fileId = item.gdrive_file_id;
                 const path = item.image_path || "";
-                const fallbackUrl = fileId ? `https://lh3.googleusercontent.com/d/${fileId}` : (path.startsWith('http') ? path : '');
-                const thumbUrl = fileId ? `https://drive.google.com/thumbnail?id=${fileId}&sz=w400` : fallbackUrl;
-                const highResUrl = fileId ? `https://drive.google.com/thumbnail?id=${fileId}&sz=w1200` : fallbackUrl;
+                const fallbackUrl = fileId ? `${API_BASE}/api/v1/drive/proxy/${fileId}` : (path.startsWith('http') ? path : '');
+                const thumbUrl = fallbackUrl;
+                const highResUrl = fallbackUrl;
 
                 let isAdded = false;
                 if (activeQ) {
@@ -422,7 +601,7 @@
 
                 return `
                 <div class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden shadow-lg hover:border-blue-500 hover:shadow-blue-500/20 transition-all flex flex-col group">
-                    <div class="relative w-full pt-[56.25%] bg-gray-900 cursor-pointer" onclick="openPreview('${highResUrl}', '${item.video_id}', 'Frame: ${item.frame_idx} | Timestamp: ${item.timestamp} | Similarity: ${displayScore}', ${item.pts_time})">
+                    <div class="relative w-full pt-[56.25%] bg-gray-900 cursor-pointer" onclick="openPreview('${highResUrl}', '${item.video_id}', 'Frame: ${item.frame_idx} | Timestamp: ${item.timestamp} | Similarity: ${displayScore}', ${item.pts_time}, ${index}, '${item.object_file_id || ""}', '${item.ocr_json_id || ""}')">
                         <img src="${thumbUrl}" class="absolute top-0 left-0 w-full h-full object-contain" loading="lazy" onerror="if('${fallbackUrl}' && this.src!=='${fallbackUrl}'){this.src='${fallbackUrl}'}">
                         ${displayScore ? `<div class="absolute top-2 left-2 bg-black/80 text-white text-[11px] font-bold px-2 py-0.5 rounded backdrop-blur-sm border border-gray-700">${displayScore}</div>` : ''}
                         <button class="absolute top-2 right-2 w-8 h-8 rounded flex items-center justify-center font-bold text-lg transition-all shadow-lg border ${isAdded ? 'bg-green-600 text-white border-green-500' : 'bg-black/50 text-white border-gray-500 hover:bg-blue-600 hover:border-blue-500 backdrop-blur-md'}" onclick="event.stopPropagation(); addToActive('${item.video_id}', ${item.frame_idx})" title="Add to Active Query">
@@ -489,7 +668,7 @@
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         query, top_k: parseInt(topKSelect.value), video_id: videoIdInput.value.trim() || null,
-                        mode: 'semantic', enable_rerank: false
+                        mode: document.getElementById('searchMode').value, enable_rerank: false
                     })
                 });
                 const data = await res.json();
