@@ -161,8 +161,14 @@ def get_supabase_video_frames(video_id: str, limit: int = Query(500, ge=1, le=20
     }
 
 
+import asyncio
 from functools import lru_cache
-from fastapi import Response
+from concurrent.futures import ThreadPoolExecutor
+from fastapi.responses import Response
+
+# Limit concurrent Google Drive requests to prevent 403 Rate Limits and thread blocking
+drive_semaphore = asyncio.Semaphore(8)
+drive_executor = ThreadPoolExecutor(max_workers=8)
 
 @lru_cache(maxsize=1000)
 def fetch_drive_file_cached(file_id: str) -> tuple[bytes, str]:
@@ -171,14 +177,22 @@ def fetch_drive_file_cached(file_id: str) -> tuple[bytes, str]:
     res = urllib.request.urlopen(req, context=ssl_context, timeout=20)
     return res.read(), res.headers.get('Content-Type', 'application/octet-stream')
 
+async def fetch_drive_file_async(file_id: str):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(drive_executor, fetch_drive_file_cached, file_id)
+
 @app.get("/api/v1/drive/proxy/{file_id}")
-def proxy_google_drive_file(file_id: str):
+async def proxy_google_drive_file(file_id: str):
     """Proxy any file content from Google Drive with in-memory LRU caching."""
-    try:
-        content, mime_type = fetch_drive_file_cached(file_id)
-        return Response(content=content, media_type=mime_type)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed fetching Google Drive File {file_id}: {str(e)}")
+    async with drive_semaphore:
+        for attempt in range(3):
+            try:
+                content, mime_type = await fetch_drive_file_async(file_id)
+                return Response(content=content, media_type=mime_type)
+            except Exception as e:
+                if attempt == 2:
+                    raise HTTPException(status_code=500, detail=f"Failed fetching Google Drive File {file_id}: {str(e)}")
+                await asyncio.sleep(0.5)
 
 
 # ====================================================================
@@ -189,6 +203,28 @@ def proxy_google_drive_file(file_id: str):
 def search_context(video_id: str, frame_idx: int, limit: int = 20):
     results = search_engine.search_context(video_id, frame_idx, limit)
     return {"status": "success", "results": results}
+
+@app.get("/api/v1/search/interval")
+def search_interval(video_id: str, start_time: float, end_time: float, limit: int = 200):
+    results = search_engine.search_interval(video_id, start_time, end_time, limit)
+    return {"status": "success", "results": results}
+
+@app.get("/api/v1/video/{video_id}/convert_time")
+def convert_time_to_frame(video_id: str, time_sec: float, fps: float = 25.0):
+    # Fetch actual FPS from local JSON map to be portable across machines
+    actual_fps = fps
+    try:
+        json_path = BASE_DIR / "video_fps_map.json"
+        if json_path.exists():
+            with open(json_path, "r", encoding="utf-8") as f:
+                fps_map = json.load(f)
+                if video_id in fps_map:
+                    actual_fps = fps_map[video_id]
+    except Exception as e:
+        print(f"Warning: Could not read local FPS map: {e}")
+
+    frame_idx = round(time_sec * actual_fps)
+    return {"status": "success", "video_id": video_id, "time_sec": time_sec, "frame_idx": frame_idx, "fps": actual_fps}
 
 @app.post("/api/v1/search/similar")
 def search_similar(req: SearchSimilarRequest):
@@ -216,12 +252,6 @@ def search_keyframes(req: SearchRequest):
             top_k=req.top_k,
             video_id_filter=req.video_id,
             enable_rerank=req.enable_rerank
-        )
-    elif req.mode == "object":
-        results = search_engine.exact_object_search(
-            query_text=req.query,
-            top_k=req.top_k,
-            video_id_filter=req.video_id
         )
     elif req.mode == "asr":
         results = search_engine.exact_asr_search(

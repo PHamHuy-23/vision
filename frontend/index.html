@@ -36,8 +36,16 @@
     <main class="flex-1 flex overflow-hidden relative">
         <!-- Content Area -->
         <div id="mainContentArea" class="flex-1 flex flex-col overflow-hidden p-4 relative z-0 transition-all duration-300">
+            <!-- Tabs Navigation -->
+            <div class="flex gap-2 mb-0">
+                <button id="tabTextSearch" class="px-4 py-2 bg-blue-600 text-white font-bold rounded-t-lg border-t border-l border-r border-blue-600 shadow-md transition-colors">Text Search</button>
+                <button id="tabVideoSearch" class="px-4 py-2 bg-gray-800 text-gray-400 font-bold rounded-t-lg border-t border-l border-r border-gray-700 hover:text-white transition-colors">Video Interval</button>
+                <button id="tabTimeConvert" class="px-4 py-2 bg-gray-800 text-gray-400 font-bold rounded-t-lg border-t border-l border-r border-gray-700 hover:text-white transition-colors">Time ➔ Frame</button>
+            </div>
+
             <!-- Search Panel -->
-            <div class="bg-gray-800 p-4 rounded-lg border border-gray-700 mb-4 shrink-0 shadow-lg">
+            <div class="bg-gray-800 p-4 rounded-b-lg rounded-tr-lg border border-gray-700 mb-4 shrink-0 shadow-lg">
+                <!-- Text Search Form -->
                 <form id="searchForm" class="flex flex-wrap gap-4 items-end">
                     <div class="flex-1 min-w-[200px]">
                         <label class="block text-sm text-gray-400 mb-1">Search Query</label>
@@ -47,7 +55,6 @@
                         <label class="block text-sm text-gray-400 mb-1">Mode</label>
                         <select id="searchMode" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors">
                             <option value="semantic">Semantic AI</option>
-                            <option value="object">Object (Exact)</option>
                             <option value="asr">ASR (Fuzzy + Synonyms)</option>
                         </select>
                     </div>
@@ -68,6 +75,47 @@
                         <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                         Search
                     </button>
+                </form>
+
+                <!-- Video Search Form -->
+                <form id="videoSearchForm" class="hidden flex flex-wrap gap-4 items-end">
+                    <div class="w-48">
+                        <label class="block text-sm text-gray-400 mb-1">Video ID <span class="text-red-400">*</span></label>
+                        <input id="vsVideoId" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" placeholder="L27_V001" required>
+                    </div>
+                    <div class="w-32">
+                        <label class="block text-sm text-gray-400 mb-1">Start Time</label>
+                        <input id="vsStartTime" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" placeholder="00:00" required>
+                    </div>
+                    <div class="w-32">
+                        <label class="block text-sm text-gray-400 mb-1">End Time</label>
+                        <input id="vsEndTime" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" placeholder="01:30" required>
+                    </div>
+                    <button type="submit" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-bold h-[42px] transition-colors shadow-lg flex items-center gap-2">
+                        Search Interval
+                    </button>
+                </form>
+
+                <!-- Time Converter Form -->
+                <form id="timeConvertForm" class="hidden flex flex-wrap gap-4 items-end">
+                    <div class="w-48">
+                        <label class="block text-sm text-gray-400 mb-1">Video ID (Optional)</label>
+                        <input id="tcVideoId" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" placeholder="L21_V001">
+                    </div>
+                    <div class="w-32">
+                        <label class="block text-sm text-gray-400 mb-1">Time (MM:SS)</label>
+                        <input id="tcSeconds" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" placeholder="01:30" required>
+                    </div>
+                    <div class="w-24">
+                        <label class="block text-sm text-gray-400 mb-1">FPS</label>
+                        <input id="tcFps" type="number" step="0.1" value="25" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" required>
+                    </div>
+                    <button type="submit" class="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded font-bold h-[42px] transition-colors shadow-lg">
+                        Convert
+                    </button>
+                    <div class="flex-1 min-w-[200px] h-[42px] flex items-center">
+                        <span id="tcResult" class="text-xl font-bold text-yellow-400 ml-4"></span>
+                    </div>
                 </form>
             </div>
 
@@ -337,6 +385,13 @@
             document.getElementById('previewImageContainer').style.display = 'inline-block';
             document.getElementById('previewModal').classList.remove('hidden');
             
+            const btn = document.getElementById('btnPlayVideo');
+            if (btn) {
+                btn.innerHTML = `<svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Play Video (Iframe)`;
+                btn.classList.replace('bg-purple-600', 'bg-blue-600');
+                btn.classList.replace('hover:bg-purple-700', 'hover:bg-blue-700');
+            }
+            
             // Update Navigation Buttons visibility
             const btnPrev = document.getElementById('modalPrev');
             const btnNext = document.getElementById('modalNext');
@@ -387,24 +442,43 @@
 
         document.getElementById('btnPlayVideo').onclick = async () => {
             const iframe = document.getElementById('videoIframe');
-            iframe.src = '';
+            const imgContainer = document.getElementById('previewImageContainer');
+            const videoContainer = document.getElementById('videoContainer');
+            const btn = document.getElementById('btnPlayVideo');
             
-            document.getElementById('modalImg').style.display = 'none';
-            document.getElementById('videoContainer').classList.remove('hidden');
-            
-            try {
-                const res = await fetch(`${API_BASE}/api/v1/video/${currentVideoId}`);
-                if (!res.ok) throw new Error("Video API failed");
-                const data = await res.json();
+            if (videoContainer.classList.contains('hidden')) {
+                // Switch to Video
+                imgContainer.style.display = 'none';
+                videoContainer.classList.remove('hidden');
+                btn.innerHTML = `<svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg> View Image`;
+                btn.classList.replace('bg-blue-600', 'bg-purple-600');
+                btn.classList.replace('hover:bg-blue-700', 'hover:bg-purple-700');
                 
-                if (data.drive_file_id) {
-                    // Nhúng Google Drive preview (kèm timestamp ở URL)
-                    iframe.src = `https://drive.google.com/file/d/${data.drive_file_id}/preview#t=${currentPts}`;
-                } else {
-                    alert("Không tìm thấy Google Drive File ID cho video này.");
+                try {
+                    const res = await fetch(`${API_BASE}/api/v1/video/${currentVideoId}`);
+                    if (!res.ok) throw new Error("Video API failed");
+                    const data = await res.json();
+                    
+                    if (data.drive_file_id) {
+                        iframe.src = `https://drive.google.com/file/d/${data.drive_file_id}/preview#t=${currentPts}`;
+                    } else {
+                        alert("Không tìm thấy Google Drive File ID cho video này.");
+                        // Revert
+                        btn.click();
+                    }
+                } catch(e) {
+                    alert("Lỗi kết nối hoặc video không tồn tại trên server.");
+                    btn.click();
                 }
-            } catch(e) {
-                alert("Lỗi kết nối hoặc video không tồn tại trên server.");
+            } else {
+                // Switch back to Image
+                iframe.src = '';
+                videoContainer.classList.add('hidden');
+                imgContainer.style.display = 'inline-block';
+                document.getElementById('modalImg').style.display = 'block';
+                btn.innerHTML = `<svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Play Video (Iframe)`;
+                btn.classList.replace('bg-purple-600', 'bg-blue-600');
+                btn.classList.replace('hover:bg-purple-700', 'hover:bg-blue-700');
             }
         };
 
@@ -676,6 +750,84 @@
                 if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.total_results || data.results.length}</span> results for "<span class="text-blue-400">${query}</span>"`; }
                 else { resultsCount.textContent = `Error: ${data.detail}`; }
             } catch (err) { spinner.style.display = 'none'; resultsCount.textContent = 'API Connection Error'; }
+        };
+
+        // Tabs Logic
+        const tabs = ['tabTextSearch', 'tabVideoSearch', 'tabTimeConvert'];
+        const forms = ['searchForm', 'videoSearchForm', 'timeConvertForm'];
+        
+        tabs.forEach((tabId, i) => {
+            document.getElementById(tabId).onclick = (e) => {
+                e.preventDefault();
+                tabs.forEach(t => {
+                    const el = document.getElementById(t);
+                    el.classList.remove('bg-blue-600', 'text-white', 'border-blue-600');
+                    el.classList.add('bg-gray-800', 'text-gray-400', 'border-gray-700');
+                });
+                document.getElementById(tabId).classList.add('bg-blue-600', 'text-white', 'border-blue-600');
+                document.getElementById(tabId).classList.remove('bg-gray-800', 'text-gray-400', 'border-gray-700');
+                
+                forms.forEach(f => document.getElementById(f).classList.add('hidden'));
+                document.getElementById(forms[i]).classList.remove('hidden');
+            };
+        });
+
+        // Video Interval Search
+        document.getElementById('videoSearchForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const vid = document.getElementById('vsVideoId').value.trim();
+            const startRaw = document.getElementById('vsStartTime').value.trim();
+            const endRaw = document.getElementById('vsEndTime').value.trim();
+            if (!vid || startRaw === "" || endRaw === "") return;
+            
+            const parseTime = (str) => {
+                if (str.includes(':')) {
+                    const parts = str.split(':');
+                    return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
+                }
+                return parseFloat(str);
+            };
+            const start = parseTime(startRaw);
+            const end = parseTime(endRaw);
+            
+            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.innerHTML = `Searching interval ${startRaw} - ${endRaw} in <span class="text-purple-400 font-bold">${vid}</span>...`;
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/search/interval?video_id=${vid}&start_time=${start}&end_time=${end}&limit=200`);
+                const data = await res.json();
+                spinner.style.display = 'none';
+                if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.results.length}</span> frames in interval.`; }
+                else { resultsCount.textContent = `Error: ${data.detail}`; }
+            } catch (err) { spinner.style.display = 'none'; resultsCount.textContent = 'API Connection Error'; }
+        };
+
+        // Time to Frame Converter
+        document.getElementById('timeConvertForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const vid = document.getElementById('tcVideoId').value.trim() || "video";
+            const rawTime = document.getElementById('tcSeconds').value.trim();
+            const fps = parseFloat(document.getElementById('tcFps').value) || 25;
+            
+            const parseTime = (str) => {
+                if (str.includes(':')) {
+                    const parts = str.split(':');
+                    return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
+                }
+                return parseFloat(str);
+            };
+            const seconds = parseTime(rawTime);
+            
+            if (isNaN(seconds)) return;
+            
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/video/${vid}/convert_time?time_sec=${seconds}&fps=${fps}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('tcResult').innerHTML = `Frame Index: <span class="text-white">${data.frame_idx}</span> <span class="text-sm text-gray-400">(@ ${data.fps} FPS)</span>`;
+                }
+            } catch (err) {
+                const frame_idx = Math.round(seconds * fps);
+                document.getElementById('tcResult').innerHTML = `Frame Index: <span class="text-white">${frame_idx}</span> <span class="text-sm text-gray-400">(@ ${fps} FPS)</span>`;
+            }
         };
 
         async function loadStats() {
