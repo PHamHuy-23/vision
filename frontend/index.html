@@ -785,12 +785,26 @@
                     const parts = str.split(':');
                     return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
                 }
+                if (/^\d+$/.test(str) && str.length >= 3) {
+                    return parseInt(str.slice(0, -2)) * 60 + parseInt(str.slice(-2));
+                }
                 return parseFloat(str);
             };
+            
+            const formatTime = (secs) => {
+                const m = Math.floor(secs / 60).toString().padStart(2, '0');
+                const s = Math.floor(secs % 60).toString().padStart(2, '0');
+                return `${m}:${s}`;
+            };
+
             const start = parseTime(startRaw);
             const end = parseTime(endRaw);
             
-            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.innerHTML = `Searching interval ${startRaw} - ${endRaw} in <span class="text-purple-400 font-bold">${vid}</span>...`;
+            // Auto-format the inputs to show the user we understood it
+            document.getElementById('vsStartTime').value = formatTime(start);
+            document.getElementById('vsEndTime').value = formatTime(end);
+            
+            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.innerHTML = `Searching interval ${formatTime(start)} - ${formatTime(end)} in <span class="text-purple-400 font-bold">${vid}</span>...`;
             try {
                 const res = await fetch(`${API_BASE}/api/v1/search/interval?video_id=${vid}&start_time=${start}&end_time=${end}&limit=200`);
                 const data = await res.json();
@@ -812,11 +826,24 @@
                     const parts = str.split(':');
                     return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
                 }
+                if (/^\d+$/.test(str) && str.length >= 3) {
+                    return parseInt(str.slice(0, -2)) * 60 + parseInt(str.slice(-2));
+                }
                 return parseFloat(str);
             };
+            
+            const formatTime = (secs) => {
+                const m = Math.floor(secs / 60).toString().padStart(2, '0');
+                const s = Math.floor(secs % 60).toString().padStart(2, '0');
+                return `${m}:${s}`;
+            };
+
             const seconds = parseTime(rawTime);
             
             if (isNaN(seconds)) return;
+            
+            // Auto-format the input to show the user we understood it
+            document.getElementById('tcSeconds').value = formatTime(seconds);
             
             try {
                 const res = await fetch(`${API_BASE}/api/v1/video/${vid}/convert_time?time_sec=${seconds}&fps=${fps}`);

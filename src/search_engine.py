@@ -308,6 +308,45 @@ class VectorSearchEngine:
             
         return results
 
+    def search_interval(self, video_id: str, start_time: float, end_time: float, limit: int = 200):
+        results = []
+        if not self.vector_map:
+            return results
+            
+        candidates = []
+        for v_id, rec in self.vector_map.items():
+            vid = rec.get("video_id")
+            if vid != video_id:
+                continue
+            ts_data = rec.get("timestamp") if isinstance(rec.get("timestamp"), dict) else {}
+            pts = float(ts_data.get("pts_time", 0.0))
+            if start_time <= pts <= end_time:
+                f_idx = ts_data.get("frame_idx", rec.get("frame_number"))
+                candidates.append((pts, f_idx, v_id, rec))
+                
+        candidates.sort(key=lambda x: x[0])  # Sort by pts_time
+        top_candidates = candidates[:limit]
+        
+        for pts, f_idx, v_id, rec in top_candidates:
+            image_data = rec.get("image") if isinstance(rec.get("image"), dict) else {}
+            minutes = int(pts // 60)
+            seconds = int(pts % 60)
+            gdrive_id = image_data.get("file_id")
+            img_url = image_data.get("url") or (f"https://lh3.googleusercontent.com/d/{gdrive_id}" if gdrive_id else "")
+            
+            results.append({
+                "video_id": video_id,
+                "frame_idx": f_idx,
+                "pts_time": pts,
+                "timestamp": f"{minutes:02d}:{seconds:02d} ({pts:.1f}s)",
+                "image_path": img_url,
+                "gdrive_file_id": gdrive_id,
+                "score": 100.0,
+                "vector_id": v_id
+            })
+            
+        return results
+
     def exact_object_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """Strict, deterministic text matching over Object labels stored in object_index."""
         results = []
