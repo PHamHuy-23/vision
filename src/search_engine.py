@@ -175,28 +175,39 @@ class VectorSearchEngine:
             query_vec = self.vectors[query_vector_id]
         else:
             import re
-            from deep_translator import GoogleTranslator
+            from deep_translator import GoogleTranslator, MyMemoryTranslator
+            from fastapi import HTTPException
             
-            # 1. Auto-Translate VI -> EN
-            try:
-                translated_text = GoogleTranslator(source='auto', target='en').translate(query_text)
-                print(f"[Search] Translated: '{query_text}' -> '{translated_text}'", flush=True)
-            except Exception as e:
-                print('Translation error:', e)
-                translated_text = query_text
+            # 1. Auto-Translate VI -> EN with robust fallback
+            translated_text = query_text
+            is_non_ascii = any(ord(c) >= 128 for c in query_text)
+            
+            if is_non_ascii:
+                try:
+                    translated_text = GoogleTranslator(source='auto', target='en').translate(query_text)
+                    print(f"[Search] Translated (Google): '{query_text}' -> '{translated_text}'", flush=True)
+                except Exception as e_google:
+                    print(f'GoogleTranslation error: {e_google}')
+                    try:
+                        translated_text = MyMemoryTranslator(source='vi-VN', target='en-US').translate(query_text)
+                        print(f"[Search] Translated (MyMemory): '{query_text}' -> '{translated_text}'", flush=True)
+                    except Exception as e_mymemory:
+                        print(f'MyMemoryTranslation error: {e_mymemory}')
+                        # Both failed. Searching Vietnamese on English CLIP will result in [UNK] tokens and exact same duplicate results.
+                        raise HTTPException(status_code=503, detail="Dịch vụ dịch thuật tạm thời quá tải. Vui lòng nhập trực tiếp Tiếng Anh hoặc thử lại sau.")
                 
-            # 2. Non-AI Algorithm: Split into clauses/keywords for compositional CLIP search
-            # Split by commas, semicolons, or the word 'and'
-            clauses = [c.strip() for c in re.split(r',|;|and', translated_text) if c.strip()]
-            
-            if len(clauses) > 1:
-                # Average the vectors of each clause (Compositional Retrieval)
+            # 2. Compositional CLIP search (Optional Power Feature)
+            # Only split if the user explicitly uses " + " to combine independent concepts
+            # e.g., "red car + dog"
+            if " + " in translated_text:
+                clauses = [c.strip() for c in translated_text.split(" + ") if c.strip()]
                 print(f"[Search] Splitting query into {len(clauses)} clauses for compositional CLIP...", flush=True)
                 vecs = [self.encode_text(c) for c in clauses]
                 import numpy as np
                 query_vec = np.mean(vecs, axis=0)
                 query_vec /= np.linalg.norm(query_vec)
             else:
+                # Standard CLIP Encoding (Preserves full sentence context)
                 query_vec = self.encode_text(translated_text)
 
         # Always request more candidates from FAISS because ~31% of vector indices
