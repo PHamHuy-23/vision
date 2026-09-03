@@ -3,21 +3,42 @@ import json
 import urllib.request
 import io
 import ssl
+import time
 from PIL import Image, ImageDraw, ImageFont
-import google.generativeai as genai
 from dotenv import load_dotenv
 
+# Import the new Google GenAI SDK
+from google import genai
+from google.genai import types
+
 load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
-if API_KEY:
-    genai.configure(api_key=API_KEY)
+
+class GeminiKeyPool:
+    def __init__(self):
+        self.keys = []
+        for i in range(1, 10):
+            k = os.getenv(f"GEMINI_API_KEY_{i}")
+            if k: self.keys.append(k)
+        main_key = os.getenv("GEMINI_API_KEY")
+        if main_key and main_key not in self.keys:
+            self.keys.append(main_key)
+        self.current_idx = 0
+        print(f"🔑 Loaded {len(self.keys)} Gemini API keys into Key Pool (Using new google-genai SDK).")
+
+    def get_next_key(self):
+        if not self.keys: return None
+        key = self.keys[self.current_idx % len(self.keys)]
+        self.current_idx += 1
+        return key
+
+key_pool = GeminiKeyPool()
 
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
 def expand_query(user_query: str) -> dict:
-    if not API_KEY:
+    if not key_pool.keys:
         return {"semantic_query": user_query, "object_keywords": [], "ocr_keywords": []}
     
     prompt = f"""
@@ -30,21 +51,40 @@ def expand_query(user_query: str) -> dict:
     2. 'object_keywords': A list of English keywords for main physical objects mentioned. Keep it simple (e.g. ["car", "red shirt", "man"]). Empty list if none.
     3. 'ocr_keywords': A list of exact text, numbers, or letters the user wants to see written on screen (like license plates, signs). Empty list if none.
     
-    User Query: \"{user_query}\"
+    User Query: "{user_query}"
     """
     
-    try:
-        model = genai.GenerativeModel('gemini-flash-latest', generation_config={"response_mime_type": "application/json"})
-        response = model.generate_content(prompt)
-        result = json.loads(response.text)
-        return {
-            "semantic_query": result.get("semantic_query", user_query),
-            "object_keywords": result.get("object_keywords", []),
-            "ocr_keywords": result.get("ocr_keywords", [])
-        }
-    except Exception as e:
-        print("Gemini API Error:", e)
-        return {"semantic_query": user_query, "object_keywords": [], "ocr_keywords": []}
+    for attempt in range(len(key_pool.keys)):
+        key = key_pool.get_next_key()
+        try:
+            # Create client with the current key
+            client = genai.Client(api_key=key)
+            
+            response = client.models.generate_content(
+                model='gemini-3.6-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
+            )
+            
+            result = json.loads(response.text)
+            return {
+                "semantic_query": result.get("semantic_query", user_query),
+                "object_keywords": result.get("object_keywords", []),
+                "ocr_keywords": result.get("ocr_keywords", [])
+            }
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "quota" in err_str or "403" in err_str or "permission_denied" in err_str:
+                print(f"⚠️ Key ending with {key[-4:]} failed (Rate limit/403 Banned), switching key...")
+                time.sleep(0.5)
+            else:
+                print("Gemini API Error:", e)
+                break
+                
+    return {"semantic_query": user_query, "object_keywords": [], "ocr_keywords": []}
 
 def create_grid_image(file_ids: list, grid_size=(4, 4), thumb_w=320, thumb_h=180):
     grid_img = Image.new('RGB', (grid_size[0] * thumb_w, grid_size[1] * thumb_h), color='black')
@@ -82,7 +122,7 @@ def create_grid_image(file_ids: list, grid_size=(4, 4), thumb_w=320, thumb_h=180
     return grid_img
 
 def rerank_images(query: str, candidates: list) -> list:
-    if not API_KEY or not candidates:
+    if not key_pool.keys or not candidates:
         return candidates
         
     top_candidates = candidates[:16]
@@ -99,22 +139,40 @@ def rerank_images(query: str, candidates: list) -> list:
     If none match perfectly, return an empty list.
     """
     
-    try:
-        print("Sending grid to Gemini Vision...")
-        model = genai.GenerativeModel('gemini-flash-latest', generation_config={"response_mime_type": "application/json"})
-        response = model.generate_content([prompt, grid_img])
-        result = json.loads(response.text)
-        matches = result.get("matches", [])
-        print(f"Gemini matches: {matches}")
-        
-        for num in matches:
-            idx = int(num) - 1
-            if 0 <= idx < len(top_candidates):
-                top_candidates[idx]['score'] += 1000 
-                top_candidates[idx]['gemini_verified'] = True
+    for attempt in range(len(key_pool.keys)):
+        key = key_pool.get_next_key()
+        try:
+            print(f"Sending grid to Gemini Vision with key ...{key[-4:]}...")
+            client = genai.Client(api_key=key)
+            
+            response = client.models.generate_content(
+                model='gemini-3.6-flash',
+                contents=[prompt, grid_img],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
+            )
+            
+            result = json.loads(response.text)
+            matches = result.get("matches", [])
+            print(f"Gemini matches: {matches}")
+            
+            for num in matches:
+                idx = int(num) - 1
+                if 0 <= idx < len(top_candidates):
+                    top_candidates[idx]['score'] += 1000 
+                    top_candidates[idx]['gemini_verified'] = True
+                    
+            candidates.sort(key=lambda x: x['score'], reverse=True)
+            return candidates
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "quota" in err_str:
+                print(f"⚠️ Key ending with {key[-4:]} hit rate limit, switching key...")
+                time.sleep(0.5)
+            else:
+                print("Gemini Vision Error:", e)
+                break
                 
-        candidates.sort(key=lambda x: x['score'], reverse=True)
-        return candidates
-    except Exception as e:
-        print("Gemini Vision Error:", e)
-        return candidates
+    return candidates

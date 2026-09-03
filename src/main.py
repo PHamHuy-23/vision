@@ -21,14 +21,14 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import DATA_ROOT, DB_PATH, CONSOLIDATED_VECTORS_PATH, BASE_DIR, HOST, PORT, CORS_ORIGINS
-from .search_engine import VectorSearchEngine
+from .sqlite_engine import SQLiteSearchEngine as VectorSearchEngine
 from .db import IndexDatabase
 from .supabase_service import SupabaseService
 
@@ -72,9 +72,7 @@ class SearchRequest(BaseModel):
     query: str = Field(..., description="Natural language search query in English")
     top_k: int = Field(20, ge=1, le=200, description="Number of top matching results to retrieve")
     video_id: Optional[str] = Field(None, description="Optional Video ID filter constraint")
-    mode: str = Field("semantic", description="Search mode: semantic, keyword, or smart")
-    enable_rerank: bool = Field(False, description="Enable Gemini Vision re-ranking (slower but more accurate)")
-
+    mode: str = Field("semantic", description="Search mode: semantic, ocr, or asr")
 
 @app.on_event("startup")
 async def startup_event():
@@ -235,6 +233,16 @@ def search_similar(req: SearchSimilarRequest):
     )
     return {"status": "success", "results": results}
 
+@app.post("/api/v1/search/image")
+async def search_by_image(file: UploadFile = File(...), top_k: int = Form(50), video_id: Optional[str] = Form(None)):
+    image_bytes = await file.read()
+    results = search_engine.search_by_image(image_bytes, top_k=top_k, video_id_filter=video_id)
+    return {
+        "status": "success",
+        "total_results": len(results),
+        "results": results
+    }
+
 @app.post("/api/v1/search")
 def search_keyframes(req: SearchRequest):
     if not req.query.strip():
@@ -246,12 +254,11 @@ def search_keyframes(req: SearchRequest):
             queries=queries,
             top_k=req.top_k
         )
-    elif req.mode == "smart":
-        results = search_engine.smart_search(
+    elif req.mode == "ocr":
+        results = search_engine.exact_ocr_search(
             query_text=req.query,
             top_k=req.top_k,
-            video_id_filter=req.video_id,
-            enable_rerank=req.enable_rerank
+            video_id_filter=req.video_id
         )
     elif req.mode == "asr":
         results = search_engine.exact_asr_search(

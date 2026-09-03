@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import open_clip
+from rank_bm25 import BM25Okapi
+import unicodedata
+import re
 
 try:
     import faiss
@@ -13,7 +16,6 @@ except ImportError:
 
 from .config import DB_PATH, CONSOLIDATED_VECTORS_PATH, CLIP_MODEL_NAME, CLIP_PRETRAINED, DATA_ROOT
 from .db import IndexDatabase
-from . import gemini_agent
 from .supabase_service import SupabaseService
 
 class VectorSearchEngine:
@@ -37,11 +39,33 @@ class VectorSearchEngine:
         self.object_index = defaultdict(set)
         self.asr_index = defaultdict(set)
         self.asr_vocab = set()
+        self.ocr_index = defaultdict(set)
+        self.ocr_vocab = set()
+        
+        # BM25 Engine added
+        self.bm25 = None
+        self.bm25_vids = []
 
         self._load_vectors()
         self._load_metadata_map()
         self._init_faiss()
         self.load_clip_model()
+
+    def _tokenize_text(self, text: str) -> list[str]:
+        if not text: return []
+        text = unicodedata.normalize('NFC', text).lower()
+        cleaned = re.sub(r'[^\w\s]', ' ', text)
+        tokens = set()
+        for t in cleaned.split():
+            if len(t) == 1 and not t.isdigit(): continue
+            tokens.add(t)
+            # Remove accents
+            t_unacc = unicodedata.normalize('NFD', t)
+            t_unacc = re.sub(r'[\u0300-\u036f]', '', t_unacc)
+            t_unacc = t_unacc.replace('đ', 'd').replace('Đ', 'd')
+            t_unacc = unicodedata.normalize('NFC', t_unacc)
+            tokens.add(t_unacc)
+        return list(tokens)
 
     def _load_metadata_map(self):
         map_file = self.data_root.parent / "frame_map_supabase.json"
@@ -71,7 +95,26 @@ class VectorSearchEngine:
                                 self.asr_index[word].add(v_id)
                                 self.asr_vocab.add(word)
                                 
+                        # Populate OCR Index
+                        ocr_text = entry.get("ocr", {}).get("text", "").lower()
+                        if ocr_text:
+                            words = set(re.findall(r'\b\w+\b', ocr_text))
+                            for word in words:
+                                self.ocr_index[word].add(v_id)
+                                self.ocr_vocab.add(word)
+                                
                 print(f"[Search Engine] Indexed {len(self.vector_map):,} unique vector metadata entries.", flush=True)
+                # Build BM25 Index (DISABLED to prevent memory freeze)
+                print("[Search Engine] Skipping BM25 Index build to save RAM (prevents system freeze).", flush=True)
+                # tokenized_corpus = []
+                # for v_id, entry in self.vector_map.items():
+                #     combined = entry.get("asr", {}).get("text", "") + " " + entry.get("ocr", {}).get("text", "") + " " + entry.get("object", {}).get("text", "")
+                #     tokens = self._tokenize_text(combined)
+                #     tokenized_corpus.append(tokens)
+                #     self.bm25_vids.append(v_id)
+                # if tokenized_corpus:
+                #     self.bm25 = BM25Okapi(tokenized_corpus)
+                # print("[Search Engine] BM25 Index built successfully!", flush=True)
             except Exception as e:
                 print(f"⚠️ Warning loading frame_map_supabase.json: {e}", flush=True)
 
@@ -216,8 +259,10 @@ class VectorSearchEngine:
                     "ocr_file_id": ocr_txt_data.get("file_id", ""),
                     "ocr_json_id": ocr_json_data.get("file_id", ""),
                     "object_file_id": object_json_data.get("file_id", ""),
-                    "asr_text": "",
-                    "objects": ""
+                    "asr_text": rec.get("asr", {}).get("text", ""),
+                    "objects": object_data.get("text", ""),
+                    "object_detections": object_data.get("detections", []),
+                    "ocr_detections": ocr_data.get("detections", [])
                 })
         else:
             vector_ids_list = [int(i) for i in top_indices]
@@ -436,7 +481,8 @@ class VectorSearchEngine:
                 "ocr_json_id": ocr_json_data.get("file_id", ""),
                 "object_file_id": object_json_data.get("file_id", ""),
                 "asr_text": "",
-                "objects": object_data.get("text", "")
+                "objects": object_data.get("text", ""),
+                "object_detections": object_data.get("detections", [])
             })
         
         # Sort by score descending
@@ -444,15 +490,15 @@ class VectorSearchEngine:
         return results[:top_k]
 
     def exact_asr_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-        """ASR Search using BM25-like Set intersection with Fuzzy Matching and Synonym support."""
+        """ASR Search using Fuzzy Matching, Synonyms, and OR-logic scoring."""
         import re
         import difflib
+        from collections import defaultdict
         
         results = []
         if not self.vector_map or not self.asr_index:
             return results
             
-        # 1. Load synonyms (if any)
         synonyms = {
             "xe hơi": ["ô tô", "oto", "car", "automobile", "xe hơi"],
             "ô tô": ["xe hơi", "oto", "car", "automobile", "ô tô"],
@@ -460,50 +506,206 @@ class VectorSearchEngine:
             "công an": ["cảnh sát", "police", "cop", "công an"]
         }
         
-        # 2. Extract words and apply fuzzy match + synonyms
         raw_terms = re.findall(r'\b\w+\b', query_text.lower())
         if not raw_terms:
             return results
             
-        # List of sets of matching v_ids for each term
-        term_matches = []
+        vid_scores = defaultdict(float)
+        total_terms = len(raw_terms)
         
         for term in raw_terms:
-            # Check synonyms first
             term_variants = synonyms.get(term, [term])
-            
-            # Fuzzy match if term not in vocab
             final_variants = set()
             for variant in term_variants:
                 if variant in self.asr_vocab:
                     final_variants.add(variant)
                 else:
-                    # Find closest match (allow 1-2 typos)
-                    matches = difflib.get_close_matches(variant, self.asr_vocab, n=2, cutoff=0.8)
+                    # Find closest match (allow typos)
+                    matches = difflib.get_close_matches(variant, self.asr_vocab, n=3, cutoff=0.7)
                     if matches:
                         final_variants.update(matches)
                         
-            # Union of all variants for this specific term
             matched_vids_for_term = set()
             for variant in final_variants:
                 matched_vids_for_term.update(self.asr_index.get(variant, set()))
                 
-            if not matched_vids_for_term:
-                # If a term is completely missing, AND logic fails
-                return []
+            for v_id in matched_vids_for_term:
+                vid_scores[v_id] += 1.0
                 
-            term_matches.append(matched_vids_for_term)
+        if not vid_scores:
+            return results
             
-        # 3. Intersection across all terms (AND logic)
-        final_vids = set.intersection(*term_matches) if term_matches else set()
+        # Sort vids by match count score
+        sorted_vids = sorted(vid_scores.items(), key=lambda x: x[1], reverse=True)
         
-        for v_id in final_vids:
+        for v_id, match_count in sorted_vids:
             rec = self.vector_map.get(v_id)
             if not rec:
                 continue
             vid = rec.get("video_id")
             if video_id_filter and vid != video_id_filter:
                 continue
+                
+            # Score as percentage of matched terms
+            score = (match_count / total_terms) * 100.0
+            
+            timestamp_data = rec.get("timestamp") if isinstance(rec.get("timestamp"), dict) else {}
+            image_data = rec.get("image") if isinstance(rec.get("image"), dict) else {}
+            ocr_data = rec.get("ocr") if isinstance(rec.get("ocr"), dict) else {}
+            object_data = rec.get("object") if isinstance(rec.get("object"), dict) else {}
+            asr_data = rec.get("asr") if isinstance(rec.get("asr"), dict) else {}
+
+            pts = float(timestamp_data.get("pts_time", 0.0))
+            minutes = int(pts // 60)
+            seconds = int(pts % 60)
+
+            gdrive_id = image_data.get("file_id")
+            img_url = image_data.get("url") or (f"https://lh3.googleusercontent.com/d/{gdrive_id}" if gdrive_id else "")
+
+            ocr_txt_data = ocr_data.get("txt") if isinstance(ocr_data.get("txt"), dict) else {}
+            ocr_json_data = ocr_data.get("json") if isinstance(ocr_data.get("json"), dict) else {}
+            object_json_data = object_data.get("json") if isinstance(object_data.get("json"), dict) else {}
+
+            results.append({
+                "video_id": vid,
+                "vector_id": int(v_id),
+                "frame_idx": timestamp_data.get("frame_idx", rec.get("frame_number")),
+                "pts_time": pts,
+                "timestamp": f"{minutes:02d}:{seconds:02d} ({pts:.1f}s)",
+                "image_path": img_url,
+                "gdrive_file_id": gdrive_id,
+                "score": float(round(score, 2)),
+                "ocr_text": ocr_data.get("text", ""),
+                "ocr_file_id": ocr_txt_data.get("file_id", ""),
+                "ocr_json_id": ocr_json_data.get("file_id", ""),
+                "object_file_id": object_json_data.get("file_id", ""),
+                "asr_text": asr_data.get("text", ""),
+                "objects": object_data.get("text", ""),
+                "object_detections": object_data.get("detections", [])
+            })
+            
+            if len(results) >= top_k:
+                break
+                
+        return results
+        
+    def exact_ocr_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        """OCR Search using Fuzzy Matching and OR-logic scoring."""
+        import re
+        import difflib
+        from collections import defaultdict
+        
+        results = []
+        if not self.vector_map or not self.ocr_index:
+            return results
+            
+        raw_terms = re.findall(r'\b\w+\b', query_text.lower())
+        if not raw_terms:
+            return results
+            
+        vid_scores = defaultdict(float)
+        total_terms = len(raw_terms)
+        
+        for term in raw_terms:
+            final_variants = set([term])
+            if term not in self.ocr_vocab:
+                # Find closest match (allow typos, e.g. OCR recognized 'quán' as 'qu.án')
+                matches = difflib.get_close_matches(term, self.ocr_vocab, n=3, cutoff=0.7)
+                if matches:
+                    final_variants.update(matches)
+                    
+            matched_vids_for_term = set()
+            for variant in final_variants:
+                matched_vids_for_term.update(self.ocr_index.get(variant, set()))
+                
+            for v_id in matched_vids_for_term:
+                vid_scores[v_id] += 1.0
+                
+        if not vid_scores:
+            return results
+            
+        # Sort vids by match count score
+        sorted_vids = sorted(vid_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        for v_id, match_count in sorted_vids:
+            rec = self.vector_map.get(v_id)
+            if not rec:
+                continue
+            vid = rec.get("video_id")
+            if video_id_filter and vid != video_id_filter:
+                continue
+                
+            # Score as percentage of matched terms
+            score = (match_count / total_terms) * 100.0
+            
+            timestamp_data = rec.get("timestamp") if isinstance(rec.get("timestamp"), dict) else {}
+            image_data = rec.get("image") if isinstance(rec.get("image"), dict) else {}
+            ocr_data = rec.get("ocr") if isinstance(rec.get("ocr"), dict) else {}
+            object_data = rec.get("object") if isinstance(rec.get("object"), dict) else {}
+            asr_data = rec.get("asr") if isinstance(rec.get("asr"), dict) else {}
+
+            pts = float(timestamp_data.get("pts_time", 0.0))
+            minutes = int(pts // 60)
+            seconds = int(pts % 60)
+
+            gdrive_id = image_data.get("file_id")
+            img_url = image_data.get("url") or (f"https://lh3.googleusercontent.com/d/{gdrive_id}" if gdrive_id else "")
+
+            ocr_txt_data = ocr_data.get("txt") if isinstance(ocr_data.get("txt"), dict) else {}
+            ocr_json_data = ocr_data.get("json") if isinstance(ocr_data.get("json"), dict) else {}
+            object_json_data = object_data.get("json") if isinstance(object_data.get("json"), dict) else {}
+
+            results.append({
+                "video_id": vid,
+                "vector_id": int(v_id),
+                "frame_idx": timestamp_data.get("frame_idx", rec.get("frame_number")),
+                "pts_time": pts,
+                "timestamp": f"{minutes:02d}:{seconds:02d} ({pts:.1f}s)",
+                "image_path": img_url,
+                "gdrive_file_id": gdrive_id,
+                "score": float(round(score, 2)),
+                "ocr_text": ocr_data.get("text", ""),
+                "ocr_detections": ocr_data.get("detections", []),
+                "ocr_file_id": ocr_txt_data.get("file_id", ""),
+                "ocr_json_id": ocr_json_data.get("file_id", ""),
+                "object_file_id": object_json_data.get("file_id", ""),
+                "asr_text": asr_data.get("text", ""),
+                "objects": object_data.get("text", ""),
+                "object_detections": object_data.get("detections", [])
+            })
+            
+            if len(results) >= top_k:
+                break
+                
+        return results
+
+    def keyword_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Perform text matching over ASR, OCR, and Object labels using High-Speed BM25 Okapi."""
+        results = []
+        if not self.bm25 or not self.vector_map:
+            return results
+            
+        query_tokens = self._tokenize_text(query_text)
+        if not query_tokens:
+            return results
+            
+        scores = self.bm25.get_scores(query_tokens)
+        top_indices = np.argsort(scores)[::-1]
+        
+        for idx in top_indices:
+            if scores[idx] <= 0:
+                continue
+                
+            v_id = self.bm25_vids[idx]
+            rec = self.vector_map.get(v_id)
+            if not rec:
+                continue
+                
+            vid = rec.get("video_id")
+            if video_id_filter and vid != video_id_filter:
+                continue
+                
+            final_score = float(round(min(100.0, (scores[idx] / len(query_tokens)) * 20), 2))
                 
             timestamp_data = rec.get("timestamp") if isinstance(rec.get("timestamp"), dict) else {}
             image_data = rec.get("image") if isinstance(rec.get("image"), dict) else {}
@@ -530,145 +732,22 @@ class VectorSearchEngine:
                 "timestamp": f"{minutes:02d}:{seconds:02d} ({pts:.1f}s)",
                 "image_path": img_url,
                 "gdrive_file_id": gdrive_id,
-                "score": 100.0,
+                "score": final_score,
                 "ocr_text": ocr_data.get("text", ""),
                 "ocr_file_id": ocr_txt_data.get("file_id", ""),
                 "ocr_json_id": ocr_json_data.get("file_id", ""),
                 "object_file_id": object_json_data.get("file_id", ""),
                 "asr_text": asr_data.get("text", ""),
-                "objects": object_data.get("text", "")
+                "objects": object_data.get("text", ""),
+                "object_detections": object_data.get("detections", [])
             })
             
-        results.sort(key=lambda x: (x["video_id"], x["pts_time"]))
-        return results[:top_k]
-
-    def keyword_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Perform text matching over OCR and Object labels stored in vector_map."""
-        results = []
-        if not self.vector_map:
-            return results
-            
-        query_terms = query_text.lower().split()
-        
-        for v_id, rec in self.vector_map.items():
-            vid = rec.get("video_id")
-            if video_id_filter and vid != video_id_filter:
-                continue
+            if len(results) >= top_k:
+                break
                 
-            ocr_text = rec.get("ocr", {}).get("text", "").lower()
-            obj_text = rec.get("object", {}).get("text", "").lower()
-            combined_text = ocr_text + " " + obj_text
-            
-            score = 0
-            for term in query_terms:
-                if term in combined_text:
-                    score += 1
-            
-            if score > 0:
-                final_score = float(round((score / len(query_terms)) * 100, 2))
-                
-                timestamp_data = rec.get("timestamp") if isinstance(rec.get("timestamp"), dict) else {}
-                image_data = rec.get("image") if isinstance(rec.get("image"), dict) else {}
-                ocr_data = rec.get("ocr") if isinstance(rec.get("ocr"), dict) else {}
-                object_data = rec.get("object") if isinstance(rec.get("object"), dict) else {}
+        return results
 
-                pts = float(timestamp_data.get("pts_time", 0.0))
-                minutes = int(pts // 60)
-                seconds = int(pts % 60)
 
-                gdrive_id = image_data.get("file_id")
-                img_url = image_data.get("url") or (f"https://lh3.googleusercontent.com/d/{gdrive_id}" if gdrive_id else "")
-
-                ocr_txt_data = ocr_data.get("txt") if isinstance(ocr_data.get("txt"), dict) else {}
-                ocr_json_data = ocr_data.get("json") if isinstance(ocr_data.get("json"), dict) else {}
-                object_json_data = object_data.get("json") if isinstance(object_data.get("json"), dict) else {}
-
-                results.append({
-                    "video_id": vid,
-                    "vector_id": int(v_id),
-                    "frame_idx": timestamp_data.get("frame_idx", rec.get("frame_number")),
-                    "pts_time": pts,
-                    "timestamp": f"{minutes:02d}:{seconds:02d} ({pts:.1f}s)",
-                    "image_path": img_url,
-                    "gdrive_file_id": gdrive_id,
-                    "score": final_score,
-                    "ocr_text": ocr_data.get("text", ""),
-                    "ocr_file_id": ocr_txt_data.get("file_id", ""),
-                    "ocr_json_id": ocr_json_data.get("file_id", ""),
-                    "object_file_id": object_json_data.get("file_id", ""),
-                    "asr_text": "",
-                    "objects": object_data.get("text", "")
-                })
-        
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:top_k]
-
-    def smart_search(self, query_text: str, top_k: int = 24, video_id_filter: Optional[str] = None, enable_rerank: bool = False) -> List[Dict[str, Any]]:
-        """Hybrid search using Gemini for query expansion (with graceful fallback)."""
-        import time
-        t0 = time.time()
-        
-        # 1. Expand query via Gemini (graceful fallback: use original query for CLIP)
-        expanded = gemini_agent.expand_query(query_text)
-        semantic_q = expanded.get("semantic_query", query_text)
-        obj_kw = expanded.get("object_keywords", [])
-        ocr_kw = expanded.get("ocr_keywords", [])
-        
-        t1 = time.time()
-        print(f"[Smart Search] Step 1 - Query Expansion: {t1-t0:.2f}s | semantic_q='{semantic_q}' | obj={obj_kw} | ocr={ocr_kw}", flush=True)
-        
-        # 2. Get Semantic results (this is the core — always works)
-        semantic_results = self.search(semantic_q, top_k=top_k*2, video_id_filter=video_id_filter)
-        
-        t2 = time.time()
-        print(f"[Smart Search] Step 2 - Semantic Search: {t2-t1:.2f}s | {len(semantic_results)} results", flush=True)
-        
-        # 3. Get Keyword results if keywords exist
-        kw_results = []
-        kw_string = " ".join(obj_kw + ocr_kw)
-        if kw_string.strip():
-            kw_results = self.keyword_search(kw_string, top_k=top_k*2, video_id_filter=video_id_filter)
-            
-        t3 = time.time()
-        print(f"[Smart Search] Step 3 - Keyword Search: {t3-t2:.2f}s | {len(kw_results)} results", flush=True)
-            
-        # 4. Merge results (Hybrid scoring)
-        merged_dict = {}
-        for r in semantic_results:
-            key = f"{r['video_id']}_{r['frame_idx']}"
-            r["semantic_score"] = r["score"]
-            r["keyword_score"] = 0
-            r["score"] = r["semantic_score"] # initial score
-            merged_dict[key] = r
-            
-        for r in kw_results:
-            key = f"{r['video_id']}_{r['frame_idx']}"
-            if key in merged_dict:
-                merged_dict[key]["keyword_score"] = r["score"]
-                # Boost score
-                merged_dict[key]["score"] = merged_dict[key]["semantic_score"] + (merged_dict[key]["keyword_score"] * 0.5)
-            else:
-                r["semantic_score"] = 0
-                r["keyword_score"] = r["score"]
-                r["score"] = r["keyword_score"] * 0.8 # penalty for no semantic match
-                merged_dict[key] = r
-                
-        final_results = list(merged_dict.values())
-        final_results.sort(key=lambda x: x["score"], reverse=True)
-        
-        t4 = time.time()
-        print(f"[Smart Search] Step 4 - Merge: {t4-t3:.2f}s | {len(final_results)} merged results", flush=True)
-        
-        # 5. Vision Re-ranking (optional — skipped by default to avoid slow thumbnail downloads + API quota issues)
-        if enable_rerank:
-            top_candidates = final_results[:max(16, top_k)] 
-            reranked_results = gemini_agent.rerank_images(query_text, top_candidates)
-            t5 = time.time()
-            print(f"[Smart Search] Step 5 - Rerank: {t5-t4:.2f}s", flush=True)
-            return reranked_results[:top_k]
-        
-        print(f"[Smart Search] Total: {time.time()-t0:.2f}s (rerank=off)", flush=True)
-        return final_results[:top_k]
 
     def temporal_search(self, queries: List[str], top_k: int = 24, max_frame_gap: int = 900) -> List[Dict[str, Any]]:
         """
@@ -677,7 +756,7 @@ class VectorSearchEngine:
         within a max_frame_gap (e.g. 900 frames = ~30 seconds).
         """
         if len(queries) < 2:
-            return self.smart_search(queries[0], top_k=top_k)
+            return self.search(queries[0], top_k=top_k)
 
         # Get top 500 for the first query to ensure we have a good pool
         # We disable re-ranking here for speed by directly calling semantic/keyword logic
@@ -720,4 +799,9 @@ class VectorSearchEngine:
         matched_sequences.sort(key=lambda x: x["score"], reverse=True)
         return matched_sequences[:top_k]
 
+    def smart_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None, enable_rerank: bool = False) -> List[Dict[str, Any]]:
+        """Fallback for smart_search which combines semantic and exact keyword search."""
+        print(f"[Smart Search] Falling back to Semantic Search (BM25 disabled/Rerank={enable_rerank})", flush=True)
+        # Without BM25, we just do a regular CLIP semantic search
+        return self.search(query_text=query_text, top_k=top_k, video_id_filter=video_id_filter)
 

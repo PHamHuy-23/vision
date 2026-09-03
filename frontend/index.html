@@ -39,6 +39,7 @@
             <!-- Tabs Navigation -->
             <div class="flex gap-2 mb-0">
                 <button id="tabTextSearch" class="px-4 py-2 bg-blue-600 text-white font-bold rounded-t-lg border-t border-l border-r border-blue-600 shadow-md transition-colors">Text Search</button>
+                <button id="tabImageSearch" class="px-4 py-2 bg-gray-800 text-gray-400 font-bold rounded-t-lg border-t border-l border-r border-gray-700 hover:text-white transition-colors">Image Search</button>
                 <button id="tabVideoSearch" class="px-4 py-2 bg-gray-800 text-gray-400 font-bold rounded-t-lg border-t border-l border-r border-gray-700 hover:text-white transition-colors">Video Interval</button>
                 <button id="tabTimeConvert" class="px-4 py-2 bg-gray-800 text-gray-400 font-bold rounded-t-lg border-t border-l border-r border-gray-700 hover:text-white transition-colors">Time ➔ Frame</button>
             </div>
@@ -54,8 +55,9 @@
                     <div class="w-40">
                         <label class="block text-sm text-gray-400 mb-1">Mode</label>
                         <select id="searchMode" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors">
-                            <option value="semantic">Semantic AI</option>
-                            <option value="asr">ASR (Fuzzy + Synonyms)</option>
+                            <option value="semantic" selected>Semantic AI (CLIP only)</option>
+                            <option value="ocr">OCR (Exact Text)</option>
+                            <option value="asr">ASR BM25 (Exact Text)</option>
                         </select>
                     </div>
                     <div class="w-32">
@@ -74,6 +76,38 @@
                     <button type="submit" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-bold h-[42px] transition-colors shadow-lg flex items-center gap-2">
                         <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                         Search
+                    </button>
+                </form>
+
+                <!-- Image Search Form -->
+                <form id="imageSearchForm" class="hidden flex flex-wrap gap-4 items-end">
+                    <div class="flex-1 min-w-[200px] border-2 border-dashed border-gray-600 rounded-lg p-4 text-center cursor-pointer hover:border-blue-500 transition-colors" id="dropZone" onclick="document.getElementById('imageInput').click()">
+                        <input type="file" id="imageInput" class="hidden" accept="image/*">
+                        <div id="imagePreviewContainer" class="hidden flex flex-col items-center">
+                            <img id="imagePreview" src="" class="max-h-32 rounded mb-2">
+                            <span class="text-xs text-gray-400">Click or Drag to change</span>
+                        </div>
+                        <div id="uploadPrompt" class="text-gray-400">
+                            <svg class="mx-auto h-8 w-8 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                            Click to Browse, Drag & Drop, or Ctrl+V to Paste
+                        </div>
+                    </div>
+                    <div class="w-32">
+                        <label class="block text-sm text-gray-400 mb-1">Video ID Filter</label>
+                        <input id="imageVideoIdInput" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" placeholder="L27_V001">
+                    </div>
+                    <div class="w-24">
+                        <label class="block text-sm text-gray-400 mb-1">Top K</label>
+                        <select id="imageTopKSelect" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500">
+                            <option value="20">20</option>
+                            <option value="50" selected>50</option>
+                            <option value="100">100</option>
+                            <option value="200">200</option>
+                        </select>
+                    </div>
+                    <button type="submit" id="imageSearchBtn" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-bold h-[42px] transition-colors shadow-lg flex items-center gap-2">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                        Search Image
                     </button>
                 </form>
 
@@ -277,83 +311,77 @@
             
             const imgW = img.naturalWidth;
             const imgH = img.naturalHeight;
+            
+            if (currentPreviewIndex === -1 || !lastResults[currentPreviewIndex]) return;
+            const currentItem = lastResults[currentPreviewIndex];
 
-            if (document.getElementById('toggleObjBbox').checked && currentObjId) {
+            if (document.getElementById('toggleObjBbox').checked && currentItem.object_detections) {
                 try {
-                    const res = await fetch(`${API_BASE}/api/v1/drive/proxy/${currentObjId}`);
-                    if (res.ok) {
-                        const data = await res.json();
-                        const boxes = data.detection_boxes || [];
-                        const classes = data.detection_class_entities || [];
-                        const scores = data.detection_scores || [];
+                    const detections = currentItem.object_detections || [];
+                    
+                    detections.forEach(det => {
+                        const score = det.score;
+                        if (score < 0.1) return; // filter low confidence
                         
-                        boxes.forEach((box, i) => {
-                            const score = parseFloat(scores[i]);
-                            if (score < 0.1) return; // filter low confidence
-                            
-                            const [ymin, xmin, ymax, xmax] = box;
-                            const top = ymin * 100;
-                            const left = xmin * 100;
-                            const height = (ymax - ymin) * 100;
-                            const width = (xmax - xmin) * 100;
-                            
-                            const boxEl = document.createElement('div');
-                            boxEl.className = 'absolute border-[1.5px] border-red-500 bg-red-500/10 pointer-events-none';
-                            boxEl.style.top = `${top}%`;
-                            boxEl.style.left = `${left}%`;
-                            boxEl.style.height = `${height}%`;
-                            boxEl.style.width = `${width}%`;
-                            
-                            const label = document.createElement('span');
-                            label.className = 'text-[9px] bg-red-500 text-white px-1 truncate absolute -top-4 left-[-1.5px] whitespace-nowrap font-sans rounded-t-sm';
-                            label.textContent = `${classes[i]} ${Math.round(score*100)}%`;
-                            
-                            boxEl.appendChild(label);
-                            overlay.appendChild(boxEl);
-                        });
-                    }
+                        // Object bbox from backend is [ymin, xmin, ymax, xmax] as absolute percentages or fractions
+                        const [ymin, xmin, ymax, xmax] = det.bbox;
+                        const top = ymin * 100;
+                        const left = xmin * 100;
+                        const height = (ymax - ymin) * 100;
+                        const width = (xmax - xmin) * 100;
+                        
+                        const boxEl = document.createElement('div');
+                        boxEl.className = 'absolute border-[1.5px] border-red-500 bg-red-500/10 pointer-events-none';
+                        boxEl.style.top = `${top}%`;
+                        boxEl.style.left = `${left}%`;
+                        boxEl.style.height = `${height}%`;
+                        boxEl.style.width = `${width}%`;
+                        
+                        const label = document.createElement('span');
+                        label.className = 'text-[9px] bg-red-500 text-white px-1 truncate absolute -top-4 left-[-1.5px] whitespace-nowrap font-sans rounded-t-sm pointer-events-auto';
+                        label.textContent = `${det.label} ${Math.round(score*100)}%`;
+                        
+                        boxEl.appendChild(label);
+                        overlay.appendChild(boxEl);
+                    });
                 } catch(e) { console.error("Error drawing obj bboxes", e); }
             }
 
-            if (document.getElementById('toggleOcrBbox').checked && currentOcrId) {
+            if (document.getElementById('toggleOcrBbox').checked && currentItem.ocr_detections) {
                 try {
-                    const res = await fetch(`${API_BASE}/api/v1/drive/proxy/${currentOcrId}`);
-                    if (res.ok) {
-                        const data = await res.json();
-                        const detections = data.detections || [];
+                    const detections = currentItem.ocr_detections || [];
+                    
+                    detections.forEach((det) => {
+                        const text = det.text;
+                        const bbox = det.bbox; // [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] in absolute pixels
+                        if (!bbox || bbox.length < 4) return;
                         
-                        detections.forEach((det) => {
-                            const text = det.text;
-                            const bbox = det.bbox; // [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] in absolute pixels
-                            if (!bbox || bbox.length < 4) return;
-                            
-                            const xs = bbox.map(p => p[0]);
-                            const ys = bbox.map(p => p[1]);
-                            const xmin = Math.min(...xs);
-                            const xmax = Math.max(...xs);
-                            const ymin = Math.min(...ys);
-                            const ymax = Math.max(...ys);
-                            
-                            const top = (ymin / imgH) * 100;
-                            const left = (xmin / imgW) * 100;
-                            const height = ((ymax - ymin) / imgH) * 100;
-                            const width = ((xmax - xmin) / imgW) * 100;
-                            
-                            const boxEl = document.createElement('div');
-                            boxEl.className = 'absolute border-[1.5px] border-blue-400 bg-blue-400/20 pointer-events-none';
-                            boxEl.style.top = `${top}%`;
-                            boxEl.style.left = `${left}%`;
-                            boxEl.style.height = `${height}%`;
-                            boxEl.style.width = `${width}%`;
-                            
-                            const label = document.createElement('span');
-                            label.className = 'text-[9px] bg-blue-500 text-white px-1 truncate absolute -bottom-4 left-[-1.5px] whitespace-nowrap font-sans rounded-b-sm';
-                            label.textContent = text;
-                            
-                            boxEl.appendChild(label);
-                            overlay.appendChild(boxEl);
-                        });
-                    }
+                        const xs = bbox.map(p => p[0]);
+                        const ys = bbox.map(p => p[1]);
+                        const xmin = Math.min(...xs);
+                        const xmax = Math.max(...xs);
+                        const ymin = Math.min(...ys);
+                        const ymax = Math.max(...ys);
+                        
+                        const top = (ymin / imgH) * 100;
+                        const left = (xmin / imgW) * 100;
+                        const height = ((ymax - ymin) / imgH) * 100;
+                        const width = ((xmax - xmin) / imgW) * 100;
+                        
+                        const boxEl = document.createElement('div');
+                        boxEl.className = 'absolute border-[1.5px] border-blue-400 bg-blue-400/20 pointer-events-none';
+                        boxEl.style.top = `${top}%`;
+                        boxEl.style.left = `${left}%`;
+                        boxEl.style.height = `${height}%`;
+                        boxEl.style.width = `${width}%`;
+                        
+                        const label = document.createElement('span');
+                        label.className = 'text-[9px] bg-blue-500 text-white px-1 truncate absolute -bottom-4 left-[-1.5px] whitespace-nowrap font-sans rounded-b-sm pointer-events-auto';
+                        label.textContent = text;
+                        
+                        boxEl.appendChild(label);
+                        overlay.appendChild(boxEl);
+                    });
                 } catch(e) { console.error("Error drawing ocr bboxes", e); }
             }
         };
@@ -753,8 +781,8 @@
         };
 
         // Tabs Logic
-        const tabs = ['tabTextSearch', 'tabVideoSearch', 'tabTimeConvert'];
-        const forms = ['searchForm', 'videoSearchForm', 'timeConvertForm'];
+        const tabs = ['tabTextSearch', 'tabImageSearch', 'tabVideoSearch', 'tabTimeConvert'];
+        const forms = ['searchForm', 'imageSearchForm', 'videoSearchForm', 'timeConvertForm'];
         
         tabs.forEach((tabId, i) => {
             document.getElementById(tabId).onclick = (e) => {
@@ -771,6 +799,71 @@
                 document.getElementById(forms[i]).classList.remove('hidden');
             };
         });
+
+        // Image Search Logic
+        const imageInput = document.getElementById('imageInput');
+        const imagePreview = document.getElementById('imagePreview');
+        const imagePreviewContainer = document.getElementById('imagePreviewContainer');
+        const uploadPrompt = document.getElementById('uploadPrompt');
+        let selectedImageFile = null;
+
+        imageInput.onchange = (e) => {
+            if (e.target.files && e.target.files[0]) {
+                handleImageSelection(e.target.files[0]);
+            }
+        };
+
+        const dropZone = document.getElementById('dropZone');
+        dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('border-blue-500'); };
+        dropZone.ondragleave = (e) => { e.preventDefault(); dropZone.classList.remove('border-blue-500'); };
+        dropZone.ondrop = (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('border-blue-500');
+            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                handleImageSelection(e.dataTransfer.files[0]);
+            }
+        };
+
+        window.addEventListener('paste', (e) => {
+            if (!document.getElementById('imageSearchForm').classList.contains('hidden') && e.clipboardData.files.length > 0) {
+                handleImageSelection(e.clipboardData.files[0]);
+            }
+        });
+
+        function handleImageSelection(file) {
+            if (!file.type.startsWith('image/')) return;
+            selectedImageFile = file;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                imagePreview.src = e.target.result;
+                imagePreviewContainer.classList.remove('hidden');
+                uploadPrompt.classList.add('hidden');
+            };
+            reader.readAsDataURL(file);
+        }
+
+        document.getElementById('imageSearchForm').onsubmit = async (e) => {
+            e.preventDefault();
+            if (!selectedImageFile) return;
+            
+            const formData = new FormData();
+            formData.append('file', selectedImageFile);
+            formData.append('top_k', document.getElementById('imageTopKSelect').value);
+            const vidFilter = document.getElementById('imageVideoIdInput').value.trim();
+            if (vidFilter) formData.append('video_id', vidFilter);
+            
+            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.textContent = 'Searching by Image...';
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/search/image`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                spinner.style.display = 'none';
+                if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.total_results || data.results.length}</span> similar images`; }
+                else { resultsCount.textContent = `Error: ${data.detail}`; }
+            } catch (err) { spinner.style.display = 'none'; resultsCount.textContent = 'API Connection Error'; }
+        };
 
         // Video Interval Search
         document.getElementById('videoSearchForm').onsubmit = async (e) => {
