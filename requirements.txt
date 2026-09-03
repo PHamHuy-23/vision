@@ -12,3 +12,4 @@ faiss-cpu>=1.7.4
 supabase>=1.0.3
 google-generativeai>=0.3.0
 Pillow>=9.0.0
+python-multipart>=0.0.6
