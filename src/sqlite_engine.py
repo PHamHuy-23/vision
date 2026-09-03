@@ -211,11 +211,21 @@ class SQLiteSearchEngine:
                     break
         return results
 
-    def search_context(self, video_id: str, frame_idx: int, limit: int = 20):
+    def search_context(self, video_id: str, frame_idx: int, limit: int = 20, surrounding: bool = False):
         results = []
         with self._get_db() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT raw_json FROM keyframes WHERE video_id = ? AND frame_idx >= ? ORDER BY frame_idx ASC LIMIT ?", (video_id, frame_idx, limit))
+            if surrounding:
+                # Query frames ordered by absolute difference
+                cur.execute("""
+                    SELECT raw_json FROM (
+                        SELECT raw_json, frame_idx FROM keyframes 
+                        WHERE video_id = ? 
+                        ORDER BY ABS(frame_idx - ?) ASC LIMIT ?
+                    ) ORDER BY frame_idx ASC
+                """, (video_id, frame_idx, limit))
+            else:
+                cur.execute("SELECT raw_json FROM keyframes WHERE video_id = ? AND frame_idx >= ? ORDER BY frame_idx ASC LIMIT ?", (video_id, frame_idx, limit))
             for row in cur.fetchall():
                 results.append(self._format_result(row['raw_json'], 1.0))
         return results

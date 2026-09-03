@@ -324,7 +324,7 @@ class VectorSearchEngine:
         return results[:top_k]
 
     
-    def search_context(self, video_id: str, frame_idx: int, limit: int = 20):
+    def search_context(self, video_id: str, frame_idx: int, limit: int = 20, surrounding: bool = False):
         results = []
         if not self.vector_map:
             return results
@@ -336,13 +336,19 @@ class VectorSearchEngine:
                 continue
             ts_data = rec.get("timestamp") if isinstance(rec.get("timestamp"), dict) else {}
             f_idx = ts_data.get("frame_idx", rec.get("frame_number"))
-            if f_idx >= frame_idx:
-                candidates.append((f_idx, v_id, rec))
+            
+            if surrounding:
+                candidates.append((abs(f_idx - frame_idx), f_idx, v_id, rec))
+            elif f_idx >= frame_idx:
+                candidates.append((f_idx, f_idx, v_id, rec))
                 
         candidates.sort(key=lambda x: x[0])
         top_candidates = candidates[:limit]
         
-        for f_idx, v_id, rec in top_candidates:
+        # Re-sort chronologically
+        top_candidates.sort(key=lambda x: x[1])
+        
+        for _, f_idx, v_id, rec in top_candidates:
             image_data = rec.get("image") if isinstance(rec.get("image"), dict) else {}
             ts_data = rec.get("timestamp") if isinstance(rec.get("timestamp"), dict) else {}
             pts = float(ts_data.get("pts_time", 0.0))

@@ -42,6 +42,7 @@
                 <button id="tabImageSearch" class="px-4 py-2 bg-gray-800 text-gray-400 font-bold rounded-t-lg border-t border-l border-r border-gray-700 hover:text-white transition-colors">Image Search</button>
                 <button id="tabVideoSearch" class="px-4 py-2 bg-gray-800 text-gray-400 font-bold rounded-t-lg border-t border-l border-r border-gray-700 hover:text-white transition-colors">Video Interval</button>
                 <button id="tabTimeConvert" class="px-4 py-2 bg-gray-800 text-gray-400 font-bold rounded-t-lg border-t border-l border-r border-gray-700 hover:text-white transition-colors">Time ➔ Frame</button>
+                <button id="tabContextSearch" class="px-4 py-2 bg-gray-800 text-gray-400 font-bold rounded-t-lg border-t border-l border-r border-gray-700 hover:text-white transition-colors">Frame Context</button>
             </div>
 
             <!-- Search Panel -->
@@ -150,6 +151,27 @@
                     <div class="flex-1 min-w-[200px] h-[42px] flex items-center">
                         <span id="tcResult" class="text-xl font-bold text-yellow-400 ml-4"></span>
                     </div>
+                </form>
+                
+                <!-- Context Search Form -->
+                <form id="contextSearchForm" class="hidden flex flex-wrap gap-4 items-end">
+                    <div class="flex-1 min-w-[200px]">
+                        <label class="block text-sm text-gray-400 mb-1">Target Frame (VideoID, FrameIdx)</label>
+                        <input id="contextInput" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors" placeholder="L21_V022, 38228" required>
+                    </div>
+                    <div class="w-24">
+                        <label class="block text-sm text-gray-400 mb-1">Limit</label>
+                        <select id="contextLimit" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500">
+                            <option value="10">10</option>
+                            <option value="20" selected>20</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded font-bold h-[42px] transition-colors shadow-lg flex items-center gap-2">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7"></path></svg>
+                        Track Frame
+                    </button>
                 </form>
             </div>
 
@@ -781,8 +803,8 @@
         };
 
         // Tabs Logic
-        const tabs = ['tabTextSearch', 'tabImageSearch', 'tabVideoSearch', 'tabTimeConvert'];
-        const forms = ['searchForm', 'imageSearchForm', 'videoSearchForm', 'timeConvertForm'];
+        const tabs = ['tabTextSearch', 'tabImageSearch', 'tabVideoSearch', 'tabTimeConvert', 'tabContextSearch'];
+        const forms = ['searchForm', 'imageSearchForm', 'videoSearchForm', 'timeConvertForm', 'contextSearchForm'];
         
         tabs.forEach((tabId, i) => {
             document.getElementById(tabId).onclick = (e) => {
@@ -947,6 +969,58 @@
             } catch (err) {
                 const frame_idx = Math.round(seconds * fps);
                 document.getElementById('tcResult').innerHTML = `Frame Index: <span class="text-white">${frame_idx}</span> <span class="text-sm text-gray-400">(@ ${fps} FPS)</span>`;
+            }
+        };
+
+        // Context Search Form
+        document.getElementById('contextSearchForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const inputVal = document.getElementById('contextInput').value.trim();
+            if (!inputVal) return;
+            
+            // Try to split by comma
+            let vid = "";
+            let frameIdx = 0;
+            
+            if (inputVal.includes(',')) {
+                const parts = inputVal.split(',');
+                vid = parts[0].trim();
+                frameIdx = parseInt(parts[1].trim());
+            } else if (inputVal.includes(' ')) {
+                const parts = inputVal.split(' ');
+                vid = parts[0].trim();
+                frameIdx = parseInt(parts[1].trim());
+            } else {
+                alert("Please enter both Video ID and Frame Index, separated by a comma (e.g. L21_V022, 38228)");
+                return;
+            }
+            
+            if (!vid || isNaN(frameIdx)) {
+                alert("Invalid format. Example: L21_V022, 38228");
+                return;
+            }
+            
+            const limit = parseInt(document.getElementById('contextLimit').value) || 20;
+            
+            spinner.style.display = 'block'; 
+            resultsGrid.innerHTML = ''; 
+            resultsCount.innerHTML = `Tracking frames around <span class="text-purple-400 font-bold">${vid}</span> frame ${frameIdx}...`;
+            
+            try {
+                // Fetch context frames around the target frame
+                // Since our API currently does next 30 frames in `trackContext`, let's just use the same API endpoint.
+                // The search_context API from search_engine actually gets context around the frame (both before and after)
+                // limit is total limit.
+                const res = await fetch(`${API_BASE}/api/v1/search/context?video_id=${vid}&frame_idx=${frameIdx}&limit=${limit}&surrounding=true`);
+                const data = await res.json();
+                spinner.style.display = 'none';
+                if (res.ok) { 
+                    renderResults(data.results); 
+                    resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.results.length}</span> context frames around frame ${frameIdx}.`; 
+                }
+            } catch(e) { 
+                spinner.style.display = 'none'; 
+                resultsCount.textContent = 'Server Connection Error.'; 
             }
         };
 

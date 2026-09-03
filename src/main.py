@@ -198,8 +198,8 @@ async def proxy_google_drive_file(file_id: str):
 # ====================================================================
 
 @app.get("/api/v1/search/context")
-def search_context(video_id: str, frame_idx: int, limit: int = 20):
-    results = search_engine.search_context(video_id, frame_idx, limit)
+def search_context(video_id: str, frame_idx: int, limit: int = 20, surrounding: bool = False):
+    results = search_engine.search_context(video_id, frame_idx, limit, surrounding=surrounding)
     return {"status": "success", "results": results}
 
 @app.get("/api/v1/search/interval")
