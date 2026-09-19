@@ -238,6 +238,15 @@ def search_context(video_id: str, frame_idx: int, limit: int = 20, surrounding: 
     results = search_engine.search_context(video_id, frame_idx, limit, surrounding=surrounding)
     return {"status": "success", "results": results}
 
+@app.get("/api/v1/video/{video_id}/frames")
+def video_frames(video_id: str, start_frame: int, end_frame: int, limit: int = 80):
+    """Return the stored keyframes in a bounded range for smooth filmstrip prefetching."""
+    if end_frame < start_frame:
+        start_frame, end_frame = end_frame, start_frame
+    limit = max(1, min(limit, 200))
+    results = search_engine.search_frame_range(video_id, start_frame, end_frame, limit)
+    return {"status": "success", "video_id": video_id, "start_frame": start_frame, "end_frame": end_frame, "results": results}
+
 @app.get("/api/v1/search/interval")
 def search_interval(video_id: str, start_time: float, end_time: float, limit: int = 200):
     results = search_engine.search_interval(video_id, start_time, end_time, limit)

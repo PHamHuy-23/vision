@@ -339,6 +339,15 @@ class SQLiteSearchEngine:
                 results.append(self._format_result(row['raw_json'], 1.0))
         return results
 
+    def search_frame_range(self, video_id: str, start_frame: int, end_frame: int, limit: int = 80):
+        results = []
+        with self._get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT raw_json FROM keyframes WHERE video_id = ? AND frame_idx >= ? AND frame_idx <= ? ORDER BY frame_idx ASC LIMIT ?", (video_id, start_frame, end_frame, limit))
+            for row in cur.fetchall():
+                results.append(self._format_result(row['raw_json'], 1.0))
+        return results
+
     def search_interval(self, video_id: str, start_time: float, end_time: float, limit: int = 200):
         results = []
         with self._get_db() as conn:
