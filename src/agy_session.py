@@ -43,21 +43,20 @@ class AgySession:
             yield f"data: [TOOL] Model Router: {model_name.upper()}\n\n"
             if self.is_first_message:
                 full_message = f"""[SYSTEM INSTRUCTIONS - HIDDEN FROM USER]
-You are an Advanced AI Video Retrieval Agent (Agentic Retrieval + Late Fusion).
-Your objective is to find the most accurate video frames for the user.
+You are an Advanced AI Video Retrieval Expert Assistant.
+Your goal is to find the best matching video frames and answer the user accurately and quickly in Vietnamese.
 
-AVAILABLE MCP TOOLS:
-- `search_semantic_video`: (Semantic Search via OpenCLIP) Use this for objects, actions, scenes. MUST translate Vietnamese queries to ENGLISH.
-- `search_ocr_video`: (Text on screen) Do NOT translate. Keep Vietnamese.
-- `search_asr_video`: (Spoken words/dialogue) Do NOT translate. Keep Vietnamese.
-- `get_frame_context`: Investigate surrounding frames/dialogue of a specific timestamp.
+AVAILABLE TOOLS:
+- `search_semantic_video(query)`: Search visual scenes, actions, objects, people, colors, vehicles, background. (Translate query to English if needed).
+- `search_ocr_video(query)`: Search ONLY when query specifies text/letters/numbers/signs on screen (e.g. quote "..." or "chữ", "biển số", "biển báo"). Keep Vietnamese.
+- `search_asr_video(query)`: Search ONLY when query specifies spoken dialogue/speech/singing (e.g. "nói", "hát", "lời thoại"). Keep Vietnamese.
+- `get_frame_context(video_id, frame_idx)`: Inspect surrounding frames before/after a timestamp (use ONLY if verifying a multi-step sequence).
 
-ADVANCED SEARCH PROTOCOL (MANDATORY):
-1. DECOMPOSITION: If the user asks for a complex sequence (e.g. "A then B"), break it down. Search for "A" first.
-2. LATE FUSION (Cross-Referencing): If the user provides a query that has both visual and textual clues (e.g. "người đàn ông đứng cạnh biển báo Nguy Hiểm"), you MUST run BOTH `search_semantic_video("man standing next to a sign")` AND `search_ocr_video("Nguy Hiểm")`. Then, compare the results and find the common `video_id`.
-3. TEMPORAL REASONING: Once you find a candidate `frame_idx`, use `get_frame_context` to scan nearby frames (seconds before/after) to verify if the sequential actions actually happen.
-4. DETAILED ANALYSIS & SUGGESTIONS: DO NOT explain your search strategy or how you used the tools (e.g. NEVER say 'Tôi đã dùng Semantic/ASR/OCR để tìm...'). Go STRAIGHT to analyzing the content of the candidates (e.g., 'Video này khớp vì có cảnh X...'). If you find multiple potential candidates, list ALL of them.
-5. FORMATTING CANDIDATES: Whenever you mention a specific frame, you MUST write it in this exact format: `VideoID, FrameIdx` (e.g., `L30_V047, 5307`). Our frontend system will automatically convert this text pattern into a clickable button for the user! Feel free to provide 3-5 candidates if you are unsure.
+STRICT EFFICIENCY & TIMING RULES (CRITICAL):
+1. FAST DECISION: For visual/action queries (e.g. "người lái xe máy", "nấu ăn trong bếp", "phỏng vấn"), call `search_semantic_video` ONCE and produce your final answer immediately. DO NOT call OCR or ASR unless the user explicitly asks for text or dialogue.
+2. STRICT STEP BUDGET: Use at most 1-2 tool calls in total. NEVER loop more than 2 times. Once you have candidate frames, synthesize your answer immediately. Do not keep searching repeatedly.
+3. FORMAT CANDIDATES: Whenever recommending a frame, ALWAYS format as `VideoID, FrameIdx` (e.g. `L21_V008, 13725`). The frontend system will automatically turn this format into an interactive card with a preview button for the user! Provide 2 to 5 top candidates.
+4. CONCISE ANSWER: Explain briefly in natural Vietnamese why each recommended candidate matches the request. Be helpful, clear, and direct.
 
 [ACTUAL USER REQUEST]
 {message}"""
@@ -113,7 +112,16 @@ ADVANCED SEARCH PROTOCOL (MANDATORY):
                                     args = {}
                             if isinstance(args, dict):
                                 tool_name = args.get("ToolName", tool_name)
-                        yield f'data: [TOOL] {tool_name}\n\n'
+                        
+                        friendly_labels = {
+                            "search_semantic_video": "🔍 Tìm kiếm ngữ nghĩa hình ảnh (OpenCLIP)",
+                            "search_ocr_video": "📝 Tìm kiếm chữ trên màn hình (OCR)",
+                            "search_asr_video": "🎙️ Tìm kiếm lời thoại & giọng nói (ASR)",
+                            "get_frame_context": "⏱️ Kiểm tra bối cảnh khung hình lân cận",
+                            "search_image_by_url": "🖼️ Tìm kiếm theo ảnh mẫu"
+                        }
+                        display_name = friendly_labels.get(tool_name, tool_name)
+                        yield f'data: [TOOL] {display_name}\n\n'
                     
  
 

@@ -10,58 +10,56 @@ API_BASE = "http://localhost:8000"
 
 def format_results(results: List[Dict[str, Any]]) -> str:
     if not results:
-        return "No results found."
+        return "Không tìm thấy kết quả phù hợp."
     output = []
-    for i, r in enumerate(results):
+    for i, r in enumerate(results[:5]):
         score = r.get('score', 0)
         vid = r.get('video_id', 'unknown')
         frame = r.get('frame_idx', 0)
-        time = r.get('timestamp', '00:00')
-        img_url = r.get('image_path', '')
+        time_str = r.get('timestamp', '00:00')
+        img_url = r.get('r2_url') or r.get('image_path', '')
         
-        info = f"[{i+1}] Video: {vid} | Frame: {frame} | Time: {time} | Match: {score}%"
-        
+        info = f"• [{i+1}] {vid}, {frame} | Time: {time_str} | Match: {score}%"
         if r.get('ocr_text'):
-            info += f"\n    OCR Text: {r['ocr_text']}"
+            info += f" | OCR: {str(r['ocr_text'])[:50]}"
         if r.get('asr_text'):
-            info += f"\n    Dialog/Voice: {r['asr_text']}"
+            info += f" | Voice: {str(r['asr_text'])[:50]}"
         if img_url:
-            info += f"\n    Image URL: {img_url}"
+            info += f" | Img: {img_url}"
             
         output.append(info)
     
     return "\n".join(output)
 
 @mcp.tool()
-async def search_semantic_video(query: str, top_k: int = 10, video_id: Optional[str] = None) -> str:
+async def search_semantic_video(query: str, top_k: int = 5, video_id: Optional[str] = None) -> str:
     """
-    Tìm kiếm khung hình video bằng AI ngữ nghĩa (Mô tả cảnh vật, con người, hành động...).
-    QUAN TRỌNG (CRITICAL): Model CLIP bên dưới chỉ hiểu Tiếng Anh. Bạn bắt buộc phải DỊCH TỪ KHÓA SANG TIẾNG ANH trước khi điền vào biến 'query' (Ví dụ: user nói 'con chó' -> query='dog').
+    Tìm kiếm khung hình video bằng AI ngữ nghĩa OpenCLIP (Mô tả cảnh vật, con người, hành động, màu sắc, phương tiện...).
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             payload = {"query": query, "top_k": top_k, "mode": "semantic"}
             if video_id:
                 payload["video_id"] = video_id
-            response = await client.post(f"{API_BASE}/api/v1/search", json=payload, timeout=30.0)
+            response = await client.post(f"{API_BASE}/api/v1/search", json=payload)
             response.raise_for_status()
             data = response.json()
-            return f"Found {data['total_results']} results for semantic query '{query}':\n" + format_results(data['results'])
+            return f"Found {data['total_results']} semantic candidates for '{query}':\n" + format_results(data['results'])
     except Exception as e:
         return f"Error connecting to backend: {str(e)}"
 
 @mcp.tool()
-async def search_ocr_video(query: str, top_k: int = 10, video_id: Optional[str] = None) -> str:
+async def search_ocr_video(query: str, top_k: int = 5, video_id: Optional[str] = None) -> str:
     """
-    Tìm kiếm chính xác đoạn text/chữ cái xuất hiện trên màn hình video (Biển báo, phụ đề cứng, chữ...).
-    Lưu ý: Đối với OCR, hãy giữ nguyên ngôn ngữ gốc (thường là Tiếng Việt), KHÔNG dịch.
+    Tìm kiếm chữ cái/văn bản xuất hiện trên màn hình video (Biển báo, phụ đề cứng, chữ...).
+    Giữ nguyên tiếng Việt, không dịch.
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             payload = {"query": query, "top_k": top_k, "mode": "ocr"}
             if video_id:
                 payload["video_id"] = video_id
-            response = await client.post(f"{API_BASE}/api/v1/search", json=payload, timeout=30.0)
+            response = await client.post(f"{API_BASE}/api/v1/search", json=payload)
             response.raise_for_status()
             data = response.json()
             return f"Found {data['total_results']} OCR results for '{query}':\n" + format_results(data['results'])
@@ -69,34 +67,34 @@ async def search_ocr_video(query: str, top_k: int = 10, video_id: Optional[str] 
         return f"Error: {str(e)}"
 
 @mcp.tool()
-async def search_asr_video(query: str, top_k: int = 10, video_id: Optional[str] = None) -> str:
+async def search_asr_video(query: str, top_k: int = 5, video_id: Optional[str] = None) -> str:
     """
     Tìm kiếm video bằng lời thoại, giọng nói nhân vật (ASR/Subtitle).
-    Lưu ý: Đối với ASR, hãy giữ nguyên ngôn ngữ gốc (Tiếng Việt), KHÔNG dịch.
+    Giữ nguyên tiếng Việt, không dịch.
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             payload = {"query": query, "top_k": top_k, "mode": "asr"}
             if video_id:
                 payload["video_id"] = video_id
-            response = await client.post(f"{API_BASE}/api/v1/search", json=payload, timeout=30.0)
+            response = await client.post(f"{API_BASE}/api/v1/search", json=payload)
             response.raise_for_status()
             data = response.json()
-            return f"Found {data['total_results']} ASR (Voice) results for '{query}':\n" + format_results(data['results'])
+            return f"Found {data['total_results']} ASR results for '{query}':\n" + format_results(data['results'])
     except Exception as e:
         return f"Error: {str(e)}"
 
 @mcp.tool()
-async def get_frame_context(video_id: str, frame_idx: int, limit: int = 10) -> str:
+async def get_frame_context(video_id: str, frame_idx: int, limit: int = 5) -> str:
     """
-    Xem các khung hình lân cận (Bối cảnh trước/sau) của một frame cụ thể trong video để hiểu diễn biến.
+    Xem các khung hình lân cận (Bối cảnh trước/sau) của một frame cụ thể trong video để hiểu diễn biến tiếp theo.
     """
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{API_BASE}/api/v1/search/context?video_id={video_id}&frame_idx={frame_idx}&limit={limit}&surrounding=true", timeout=30.0)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(f"{API_BASE}/api/v1/search/context?video_id={video_id}&frame_idx={frame_idx}&limit={limit}&surrounding=true")
             response.raise_for_status()
             data = response.json()
-            return f"Context frames for Video {video_id} near Frame {frame_idx}:\n" + format_results(data['results'])
+            return f"Context frames for {video_id} around Frame {frame_idx}:\n" + format_results(data['results'])
     except Exception as e:
         return f"Error: {str(e)}"
 
