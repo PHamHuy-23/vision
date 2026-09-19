@@ -247,6 +247,13 @@ def video_frames(video_id: str, start_frame: int, end_frame: int, limit: int = 8
     results = search_engine.search_frame_range(video_id, start_frame, end_frame, limit)
     return {"status": "success", "video_id": video_id, "start_frame": start_frame, "end_frame": end_frame, "results": results}
 
+@app.get("/api/v1/video/{video_id}/filmstrip")
+def video_filmstrip(video_id: str, anchor_frame: int, direction: str = "around", limit: int = 40):
+    if direction not in {"around", "before", "after"}:
+        raise HTTPException(status_code=400, detail="direction must be around, before, or after")
+    results = search_engine.search_frame_page(video_id, anchor_frame, direction, limit)
+    return {"status": "success", "video_id": video_id, "anchor_frame": anchor_frame, "direction": direction, "results": results}
+
 @app.get("/api/v1/search/interval")
 def search_interval(video_id: str, start_time: float, end_time: float, limit: int = 200):
     results = search_engine.search_interval(video_id, start_time, end_time, limit)

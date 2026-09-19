@@ -348,6 +348,26 @@ class SQLiteSearchEngine:
                 results.append(self._format_result(row['raw_json'], 1.0))
         return results
 
+    def search_frame_page(self, video_id: str, anchor_frame: int, direction: str = "around", limit: int = 40):
+        """Page through stored keyframes by database order, not numeric frame distance."""
+        limit = max(1, min(int(limit), 200))
+        with self._get_db() as conn:
+            cur = conn.cursor()
+            if direction == "before":
+                cur.execute("SELECT raw_json FROM keyframes WHERE video_id = ? AND frame_idx < ? ORDER BY frame_idx DESC LIMIT ?", (video_id, anchor_frame, limit))
+                rows = list(reversed(cur.fetchall()))
+            elif direction == "after":
+                cur.execute("SELECT raw_json FROM keyframes WHERE video_id = ? AND frame_idx > ? ORDER BY frame_idx ASC LIMIT ?", (video_id, anchor_frame, limit))
+                rows = cur.fetchall()
+            else:
+                before_count = limit // 2
+                after_count = limit - before_count - 1
+                cur.execute("SELECT raw_json FROM keyframes WHERE video_id = ? AND frame_idx <= ? ORDER BY frame_idx DESC LIMIT ?", (video_id, anchor_frame, before_count + 1))
+                before = list(reversed(cur.fetchall()))
+                cur.execute("SELECT raw_json FROM keyframes WHERE video_id = ? AND frame_idx > ? ORDER BY frame_idx ASC LIMIT ?", (video_id, anchor_frame, after_count))
+                rows = before + cur.fetchall()
+        return [self._format_result(row['raw_json'], 1.0) for row in rows]
+
     def search_interval(self, video_id: str, start_time: float, end_time: float, limit: int = 200):
         results = []
         with self._get_db() as conn:

@@ -422,7 +422,7 @@
         let filmstripPageLoading = false;
         let filmstripRangeStart = 0;
         let filmstripRangeEnd = 0;
-        const FILMSTRIP_PREFETCH = 80;
+        const FILMSTRIP_PAGE_SIZE = 40;
 
         function frameImageUrl(item) {
             const fileId = item.gdrive_file_id;
@@ -462,26 +462,35 @@
             renderFilmstrip();
         }
 
-        async function loadFilmstrip(videoId, frameIdx, start = null, end = null) {
+        async function loadFilmstrip(videoId, frameIdx, direction = 'around') {
             if (filmstripPageLoading) return;
             filmstripPageLoading = true;
             const strip = document.getElementById('filmstrip');
-            if (strip) strip.classList.add('hidden');
+            const track = document.getElementById('filmstripTrack');
+            const oldWidth = track ? track.scrollWidth : 0;
+            const oldLeft = track ? track.scrollLeft : 0;
+            if (strip && direction === 'around') strip.classList.add('hidden');
             try {
-                const rangeStart = start == null ? Math.max(0, Number(frameIdx) - FILMSTRIP_PREFETCH) : start;
-                const rangeEnd = end == null ? Number(frameIdx) + FILMSTRIP_PREFETCH : end;
-                const res = await fetch(`${API_BASE}/api/v1/video/${encodeURIComponent(videoId)}/frames?start_frame=${rangeStart}&end_frame=${rangeEnd}&limit=200`);
+                const res = await fetch(`${API_BASE}/api/v1/video/${encodeURIComponent(videoId)}/filmstrip?anchor_frame=${encodeURIComponent(frameIdx)}&direction=${direction}&limit=${FILMSTRIP_PAGE_SIZE}`);
                 const data = await res.json();
                 const merged = new Map(filmstripFrames.map(item => [Number(item.frame_idx), item]));
                 (data.results || []).forEach(item => merged.set(Number(item.frame_idx), item));
                 filmstripFrames = Array.from(merged.values()).sort((a, b) => Number(a.frame_idx) - Number(b.frame_idx));
-                filmstripRangeStart = filmstripFrames.length ? Number(filmstripFrames[0].frame_idx) : rangeStart;
-                filmstripRangeEnd = filmstripFrames.length ? Number(filmstripFrames[filmstripFrames.length - 1].frame_idx) : rangeEnd;
+                filmstripRangeStart = filmstripFrames.length ? Number(filmstripFrames[0].frame_idx) : Number(frameIdx);
+                filmstripRangeEnd = filmstripFrames.length ? Number(filmstripFrames[filmstripFrames.length - 1].frame_idx) : Number(frameIdx);
                 if (filmstripFrames.length) {
                     const closest = filmstripFrames.reduce((best, item) => Math.abs(Number(item.frame_idx) - Number(frameIdx)) < Math.abs(Number(best.frame_idx) - Number(frameIdx)) ? item : best, filmstripFrames[0]);
                     filmstripCenterFrame = closest.frame_idx;
                 } else filmstripCenterFrame = frameIdx;
                 renderFilmstrip();
+                requestAnimationFrame(() => {
+                    if (!track) return;
+                    if (direction === 'before') track.scrollLeft = oldLeft + (track.scrollWidth - oldWidth);
+                    else if (direction === 'around') {
+                        const active = track.querySelector(`[data-frame="${filmstripCenterFrame}"]`);
+                        if (active) active.scrollIntoView({ block: 'nearest', inline: 'center' });
+                    }
+                });
             } catch (err) { console.warn('Filmstrip load failed', err); }
             finally { filmstripPageLoading = false; }
         }
@@ -490,9 +499,9 @@
             const track = document.getElementById('filmstripTrack');
             if (filmstripPageLoading || !currentVideoId) return;
             if (track.scrollLeft < 500) {
-                loadFilmstrip(currentVideoId, filmstripCenterFrame, Math.max(0, filmstripRangeStart - FILMSTRIP_PREFETCH), filmstripRangeStart - 1);
+                loadFilmstrip(currentVideoId, filmstripRangeStart, 'before');
             } else if (track.scrollWidth - track.clientWidth - track.scrollLeft < 500) {
-                loadFilmstrip(currentVideoId, filmstripCenterFrame, filmstripRangeEnd + 1, filmstripRangeEnd + FILMSTRIP_PREFETCH);
+                loadFilmstrip(currentVideoId, filmstripRangeEnd, 'after');
             }
         }, { passive: true });
 
@@ -610,7 +619,7 @@
             filmstripFrames = [];
             filmstripRangeStart = 0;
             filmstripRangeEnd = 0;
-            loadFilmstrip(videoId, Number((details.match(/Frame:\s*([\d.]+)/) || [])[1]) || 0);
+            loadFilmstrip(videoId, Number((details.match(/Frame:\s*([\d.]+)/) || [])[1]) || 0, 'around');
             
             const btn = document.getElementById('btnPlayVideo');
             if (btn) {
