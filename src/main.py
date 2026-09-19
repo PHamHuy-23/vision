@@ -323,6 +323,7 @@ async def chat_endpoint(req: ChatRequest):
 @app.post("/api/v1/search")
 def search_keyframes(req: SearchRequest):
     import time
+    import re
     start_time = time.time()
     
     if not req.query.strip():
@@ -339,8 +340,21 @@ def search_keyframes(req: SearchRequest):
         except Exception as e:
             print(f"[FastTranslator] Translation warning: {e}", flush=True)
 
-    if "->" in req.query:
-        queries = [q.strip() for q in req.query.split("->") if q.strip()]
+    temporal_requested = req.mode == "temporal" or "->" in req.query
+    if temporal_requested:
+        # Accept explicit arrows, one event per line, or ordinary multi-sentence prose.
+        queries = [q.strip(" \t\r\n.-") for q in re.split(r'\s*(?:->|\r?\n+|(?<=[.!?])\s+)\s*', req.query) if q.strip(" \t\r\n.-")]
+        if len(queries) == 1:
+            queries = [q.strip() for q in re.split(r'\b(?:sau đó|tiếp theo|rồi)\b', req.query, flags=re.IGNORECASE) if q.strip()]
+
+        # Reuse the existing translator independently per event so each semantic
+        # search receives a focused query rather than one long paragraph.
+        try:
+            from .fast_translator import fast_translator
+            queries = [fast_translator.translate(q) for q in queries]
+        except Exception as e:
+            print(f"[FastTranslator] Temporal translation warning: {e}", flush=True)
+
         results = search_engine.temporal_search(
             queries=queries,
             top_k=req.top_k

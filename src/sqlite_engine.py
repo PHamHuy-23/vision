@@ -460,34 +460,94 @@ class SQLiteSearchEngine:
     def smart_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None, enable_rerank: bool = False) -> List[Dict[str, Any]]:
         return self.search(query_text=query_text, top_k=top_k, video_id_filter=video_id_filter)
 
-    def temporal_search(self, queries: List[str], top_k: int = 24, max_frame_gap: int = 900) -> List[Dict[str, Any]]:
-        if len(queries) < 2:
+    def temporal_search(self, queries: List[str], top_k: int = 24, max_gap_seconds: float = 120.0,
+                        max_total_seconds: float = 360.0, candidates_per_step: int = 200) -> List[Dict[str, Any]]:
+        """Find an ordered multi-event chain in the same video using existing frame vectors."""
+        queries = [q.strip() for q in queries if q and q.strip()]
+        if not queries:
+            return []
+        if len(queries) == 1:
             return self.search(queries[0], top_k=top_k)
-        q1_results = self.search(queries[0], top_k=200)
-        q2_results = self.search(queries[1], top_k=200)
-        
-        q2_by_vid = {}
-        for r2 in q2_results:
-            vid = r2["video_id"]
-            if vid not in q2_by_vid: q2_by_vid[vid] = []
-            q2_by_vid[vid].append(r2)
 
-        matched_sequences = []
-        for r1 in q1_results:
-            vid = r1["video_id"]
-            if vid not in q2_by_vid: continue
-            frame1 = r1["frame_idx"]
-            for r2 in q2_by_vid[vid]:
-                frame2 = r2["frame_idx"]
-                if 0 < (frame2 - frame1) <= max_frame_gap:
-                    combined_score = r1["score"] + r2["score"]
-                    seq_result = r1.copy()
-                    seq_result["score"] = combined_score / 2.0
-                    seq_result["temporal_match"] = f"Next event at Frame {frame2} ({r2['timestamp']})"
-                    matched_sequences.append(seq_result)
+        step_results = [self.search(q, top_k=candidates_per_step) for q in queries]
+        by_step = []
+        for results in step_results:
+            grouped = {}
+            for item in results:
+                grouped.setdefault(item.get("video_id"), []).append(item)
+            for items in grouped.values():
+                items.sort(key=lambda x: float(x.get("pts_time") or 0))
+            by_step.append(grouped)
+
+        common_videos = set(by_step[0])
+        for grouped in by_step[1:]:
+            common_videos &= set(grouped)
+
+        def normalized_score(item):
+            value = float(item.get("score") or 0)
+            return value / 100.0 if value > 1.0 else value
+
+        sequences = []
+        for video_id in common_videos:
+            # Beam entries are (sum_score, [event items]). Keeping a compact beam
+            # prevents combinatorial explosion while still considering alternatives.
+            beam = [(normalized_score(item), [item]) for item in by_step[0][video_id]]
+            beam.sort(key=lambda x: x[0], reverse=True)
+            beam = beam[:80]
+
+            for step_index in range(1, len(queries)):
+                expanded = []
+                for score_sum, chain in beam:
+                    previous_time = float(chain[-1].get("pts_time") or 0)
+                    start_time = float(chain[0].get("pts_time") or 0)
+                    for item in by_step[step_index][video_id]:
+                        current_time = float(item.get("pts_time") or 0)
+                        gap = current_time - previous_time
+                        total_span = current_time - start_time
+                        if gap <= 0:
+                            continue
+                        if gap > max_gap_seconds or total_span > max_total_seconds:
+                            if current_time > previous_time:
+                                break
+                            continue
+                        # Prefer compact chains while retaining the original similarity.
+                        gap_penalty = min(gap / max_gap_seconds, 1.0) * 0.08
+                        expanded.append((score_sum + normalized_score(item) - gap_penalty, chain + [item]))
+                if not expanded:
+                    beam = []
                     break
-        matched_sequences.sort(key=lambda x: x["score"], reverse=True)
-        return matched_sequences[:top_k]
+                expanded.sort(key=lambda x: x[0], reverse=True)
+                beam = expanded[:100]
+
+            if not beam:
+                continue
+            best_score, best_chain = max(beam, key=lambda x: x[0])
+            start_time = float(best_chain[0].get("pts_time") or 0)
+            end_time = float(best_chain[-1].get("pts_time") or 0)
+            result = best_chain[0].copy()
+            result["score"] = round(max(0.0, best_score / len(queries)) * 100.0, 2)
+            result["matched_steps"] = len(best_chain)
+            result["total_steps"] = len(queries)
+            result["sequence_start_time"] = start_time
+            result["sequence_end_time"] = end_time
+            result["temporal_events"] = [
+                {
+                    "step": i + 1,
+                    "query": queries[i],
+                    "frame_idx": event.get("frame_idx"),
+                    "pts_time": event.get("pts_time"),
+                    "timestamp": event.get("timestamp"),
+                    "score": event.get("score"),
+                    "r2_url": event.get("r2_url"),
+                    "image_path": event.get("image_path"),
+                    "gdrive_file_id": event.get("gdrive_file_id"),
+                }
+                for i, event in enumerate(best_chain)
+            ]
+            sequences.append(result)
+
+        sequences.sort(key=lambda x: (x["matched_steps"], x["score"]), reverse=True)
+        return sequences[:top_k]
 
     def hybrid_search(self, query_text: str, top_k: int = 50, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         import re

@@ -908,6 +908,17 @@
                     }
 
                     const displayScore = item.score !== undefined ? `${parseFloat(item.score).toFixed(1)}%` : '';
+                    const temporalTimeline = Array.isArray(item.temporal_events) && item.temporal_events.length > 1
+                        ? `<div class="mt-1 pt-2 border-t border-gray-700">
+                            <div class="text-[10px] uppercase tracking-wide text-emerald-400 font-bold mb-1">Sequence ${item.matched_steps}/${item.total_steps}</div>
+                            <div class="flex gap-1 overflow-x-auto pb-1">${item.temporal_events.map((event, eventIndex) => {
+                                const eventUrl = event.r2_url || (event.gdrive_file_id ? `${API_BASE}/api/v1/drive/proxy/${event.gdrive_file_id}` : (String(event.image_path || '').startsWith('http') ? event.image_path : ''));
+                                return `<button type="button" class="shrink-0 w-16 rounded bg-gray-900 border border-gray-700 hover:border-emerald-400 overflow-hidden" onclick="event.stopPropagation(); openPreview('${eventUrl}', '${item.video_id}', 'Frame: ${Number(event.frame_idx)} | Timestamp: ${event.timestamp || 'N/A'} | Step: ${eventIndex + 1}/${item.temporal_events.length}', ${Number(event.pts_time || 0)}, -1)">
+                                    <img src="${eventUrl}" class="w-16 h-9 object-contain" loading="lazy">
+                                    <span class="block text-[9px] text-gray-300">${eventIndex + 1} · ${event.timestamp || event.frame_idx}</span>
+                                </button>`;
+                            }).join('')}</div>
+                        </div>` : '';
 
                     return `
                     <div class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden shadow-lg hover:border-blue-500 hover:shadow-blue-500/20 transition-all flex flex-col group">
@@ -928,6 +939,7 @@
                                 <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                                 ${item.timestamp}
                             </div>
+                            ${temporalTimeline}
                             
                             <div class="grid grid-cols-2 gap-2 mt-1 pt-2 border-t border-gray-700">
                                 <button class="bg-gray-700 hover:bg-blue-600 text-white text-xs py-1.5 rounded transition-colors flex items-center justify-center gap-1 font-medium" onclick="event.stopPropagation(); findSimilar(${item.vector_id})" title="Search for visually similar frames">
