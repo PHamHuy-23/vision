@@ -69,6 +69,17 @@
                         <label class="block text-sm text-gray-400 mb-1">Search Query</label>
                         <input id="queryInput" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors" placeholder="Enter text to search frames...">
                     </div>
+                    <div class="w-40">
+                        <label class="block text-sm text-gray-400 mb-1">Mode</label>
+                        <select id="searchMode" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors">
+                            <option value="semantic" selected>Semantic AI (CLIP only)</option>
+                            <option value="ocr">OCR (Exact Text)</option>
+                            <option value="asr">ASR BM25 (Exact Text)</option>
+                            <option value="hybrid">Late Fusion (Semantic + OCR + ASR)</option>
+                            <option value="temporal">Temporal AI (Sliding Window)</option>
+                            <option value="hierarchical">Hierarchical (Super Fast 2-Stage)</option>
+                        </select>
+                    </div>
                     <div class="w-32">
                         <label class="block text-sm text-gray-400 mb-1">Video ID Filter</label>
                         <input id="videoIdInput" type="text" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" placeholder="L27_V001">
@@ -209,14 +220,7 @@
                 <div id="spinner" class="hidden absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50">
                     <div class="spinner"></div>
                 </div>
-                <div class="flex gap-2 border-b border-gray-700 mb-4" role="tablist" aria-label="Search dimensions">
-                    <button type="button" class="search-dimension-tab px-3 py-2 text-sm font-bold text-white border-b-2 border-blue-500" data-dimension="clip">CLIP <span id="clipCount"></span></button>
-                    <button type="button" class="search-dimension-tab px-3 py-2 text-sm font-bold text-gray-400 border-b-2 border-transparent" data-dimension="ocr">OCR <span id="ocrCount"></span></button>
-                    <button type="button" class="search-dimension-tab px-3 py-2 text-sm font-bold text-gray-400 border-b-2 border-transparent" data-dimension="asr">ASR <span id="asrCount"></span></button>
-                </div>
                 <div id="resultsGrid" data-dimension-panel="clip" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 pb-10"></div>
-                <div id="ocrResultsGrid" data-dimension-panel="ocr" class="hidden grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 pb-10"></div>
-                <div id="asrResultsGrid" data-dimension-panel="asr" class="hidden grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 pb-10"></div>
             </div>
         </div>
 
@@ -922,15 +926,14 @@
                 if (telemetryDiv) telemetryDiv.classList.remove('hidden');
                 if (badgeApi) badgeApi.innerHTML = `<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg> API: đang tìm...`;
                 spinner.style.display = 'block';
-                resultsGrid.innerHTML = '<div class="col-span-full text-center py-10 text-gray-500">CLIP searching...</div>';
-                document.getElementById('ocrResultsGrid').innerHTML = '<div class="col-span-full text-center py-10 text-gray-500">OCR searching...</div>';
-                document.getElementById('asrResultsGrid').innerHTML = '<div class="col-span-full text-center py-10 text-gray-500">ASR searching...</div>';
-                resultsCount.textContent = 'Searching CLIP, OCR and ASR in parallel...';
+                resultsGrid.innerHTML = '';
+                resultsCount.textContent = 'Searching...';
                 try {
-                    const res = await fetch(`${API_BASE}/api/v1/search/all`, {
+                    const res = await fetch(`${API_BASE}/api/v1/search`, {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            query, top_k: parseInt(topKSelect.value), video_id: videoIdInput.value.trim() || null
+                            query, top_k: parseInt(topKSelect.value), video_id: videoIdInput.value.trim() || null,
+                            mode: document.getElementById('searchMode').value, enable_rerank: false
                         })
                     });
                     const apiDuration = Math.round(performance.now() - searchStartTime);
@@ -938,37 +941,12 @@
                     const data = await res.json();
                     spinner.style.display = 'none';
                     if (res.ok) {
-                        const branches = data.results || {};
-                        const clip = branches.semantic || { results: [] };
-                        const ocr = branches.ocr || { results: [] };
-                        const asr = branches.asr || { results: [] };
-                        renderResults(clip.results, searchStartTime, resultsGrid);
-                        renderResults(ocr.results, searchStartTime, document.getElementById('ocrResultsGrid'));
-                        renderResults(asr.results, searchStartTime, document.getElementById('asrResultsGrid'));
-                        document.getElementById('clipCount').textContent = `(${clip.results.length})`;
-                        document.getElementById('ocrCount').textContent = `(${ocr.results.length})`;
-                        document.getElementById('asrCount').textContent = `(${asr.results.length})`;
-                        resultsCount.innerHTML = `Found <span class="text-white font-bold">${clip.results.length + ocr.results.length + asr.results.length}</span> results across CLIP, OCR and ASR for "<span class="text-blue-400">${query}</span>"`;
+                        renderResults(data.results, searchStartTime, resultsGrid);
+                        resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.total_results || data.results.length}</span> results for "<span class="text-blue-400">${query}</span>"`;
                     }
                     else { resultsCount.textContent = `Error: ${data.detail}`; }
                 } catch (err) { spinner.style.display = 'none'; resultsCount.textContent = 'API Connection Error'; }
             };
-
-        document.querySelectorAll('.search-dimension-tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                const dimension = tab.dataset.dimension;
-                document.querySelectorAll('.search-dimension-tab').forEach(t => {
-                    const active = t === tab;
-                    t.classList.toggle('text-white', active);
-                    t.classList.toggle('text-gray-400', !active);
-                    t.classList.toggle('border-blue-500', active);
-                    t.classList.toggle('border-transparent', !active);
-                });
-                document.querySelectorAll('[data-dimension-panel]').forEach(panel => {
-                    panel.classList.toggle('hidden', panel.dataset.dimensionPanel !== dimension);
-                });
-            });
-        });
 
         // Tabs Logic
         const tabs = ['tabTextSearch', 'tabImageSearch', 'tabTimeConvert', 'tabContextSearch'];
