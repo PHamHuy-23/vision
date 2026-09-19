@@ -339,7 +339,7 @@
             <div id="filmstrip" class="w-full max-w-5xl mb-4 hidden">
                 <div class="flex items-center gap-2">
                     <button id="filmstripPrev" class="shrink-0 text-white/70 hover:text-white text-2xl px-2" type="button">‹</button>
-                    <div id="filmstripTrack" class="flex-1 flex items-center gap-2 overflow-x-auto py-2 px-1 scroll-smooth"></div>
+                    <div id="filmstripTrack" class="flex-1 flex items-center justify-center gap-2 overflow-hidden py-2 px-1"></div>
                     <button id="filmstripNext" class="shrink-0 text-white/70 hover:text-white text-2xl px-2" type="button">›</button>
                 </div>
             </div>
@@ -410,8 +410,12 @@
             document.getElementById('videoIframe').src = ''; // Dừng phát video khi đóng modal
             document.getElementById('filmstrip').classList.add('hidden');
         };
-        document.getElementById('filmstripPrev').onclick = () => document.getElementById('filmstripTrack').scrollBy({ left: -420, behavior: 'smooth' });
-        document.getElementById('filmstripNext').onclick = () => document.getElementById('filmstripTrack').scrollBy({ left: 420, behavior: 'smooth' });
+        document.getElementById('filmstripPrev').onclick = () => {
+            if (currentVideoId && filmstripCenterFrame != null) loadFilmstrip(currentVideoId, Math.max(0, Number(filmstripCenterFrame) - FILMSTRIP_PAGE_STEP));
+        };
+        document.getElementById('filmstripNext').onclick = () => {
+            if (currentVideoId && filmstripCenterFrame != null) loadFilmstrip(currentVideoId, Number(filmstripCenterFrame) + FILMSTRIP_PAGE_STEP);
+        };
         let currentPts = 0;
         let currentVideoId = '';
         let currentPreviewIndex = -1;
@@ -419,6 +423,9 @@
         let currentOcrId = '';
         let filmstripFrames = [];
         let filmstripCenterFrame = null;
+        let filmstripPageLoading = false;
+        const FILMSTRIP_PAGE_SIZE = 15;
+        const FILMSTRIP_PAGE_STEP = 7;
 
         function frameImageUrl(item) {
             const fileId = item.gdrive_file_id;
@@ -433,7 +440,7 @@
             strip.classList.remove('hidden');
             track.innerHTML = filmstripFrames.map((item) => {
                 const active = Number(item.frame_idx) === Number(filmstripCenterFrame);
-                return `<button type="button" data-frame="${item.frame_idx}" class="film-frame shrink-0 w-24 ${active ? 'ring-2 ring-blue-400 scale-105' : 'opacity-70 hover:opacity-100'} rounded overflow-hidden bg-gray-800 transition" title="Frame ${item.frame_idx}">
+                return `<button type="button" data-frame="${item.frame_idx}" class="film-frame shrink-0 w-24 ${active ? 'ring-2 ring-blue-400 scale-105 opacity-100' : 'opacity-70 hover:opacity-100'} rounded overflow-hidden bg-gray-800 transition" title="Frame ${item.frame_idx}">
                     <img src="${frameImageUrl(item)}" class="w-24 h-14 object-contain" loading="lazy" alt="Frame ${item.frame_idx}">
                     <span class="block text-[10px] text-gray-300 font-mono py-0.5">${item.timestamp || item.frame_idx}</span>
                 </button>`;
@@ -443,7 +450,7 @@
                 if (item) selectFilmstripFrame(item);
             });
             const active = track.querySelector(`[data-frame="${filmstripCenterFrame}"]`);
-            if (active) active.scrollIntoView({ behavior: 'instant', block: 'nearest', inline: 'center' });
+            if (active) active.classList.add('bg-blue-950');
         }
 
         function selectFilmstripFrame(item) {
@@ -459,15 +466,21 @@
         }
 
         async function loadFilmstrip(videoId, frameIdx) {
+            if (filmstripPageLoading) return;
+            filmstripPageLoading = true;
             const strip = document.getElementById('filmstrip');
             if (strip) strip.classList.add('hidden');
             try {
-                const res = await fetch(`${API_BASE}/api/v1/search/context?video_id=${encodeURIComponent(videoId)}&frame_idx=${encodeURIComponent(frameIdx)}&limit=21&surrounding=true`);
+                const res = await fetch(`${API_BASE}/api/v1/search/context?video_id=${encodeURIComponent(videoId)}&frame_idx=${encodeURIComponent(frameIdx)}&limit=${FILMSTRIP_PAGE_SIZE}&surrounding=true`);
                 const data = await res.json();
                 filmstripFrames = data.results || [];
-                filmstripCenterFrame = frameIdx;
+                if (filmstripFrames.length) {
+                    const closest = filmstripFrames.reduce((best, item) => Math.abs(Number(item.frame_idx) - Number(frameIdx)) < Math.abs(Number(best.frame_idx) - Number(frameIdx)) ? item : best, filmstripFrames[0]);
+                    filmstripCenterFrame = closest.frame_idx;
+                } else filmstripCenterFrame = frameIdx;
                 renderFilmstrip();
             } catch (err) { console.warn('Filmstrip load failed', err); }
+            finally { filmstripPageLoading = false; }
         }
 
         window.drawBboxes = async () => {
