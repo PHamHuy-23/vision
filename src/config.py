@@ -22,7 +22,7 @@ KEYFRAMES_DIR_NAME = os.getenv("KEYFRAMES_DIR_NAME", "keyframes")
 MAPPING_DIR_NAME = os.getenv("MAPPING_DIR_NAME", "map_keyframes")
 
 # Database & Vector storage paths
-DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "video_index.db"))).resolve()
+DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "video_index_v2.db"))).resolve()
 CONSOLIDATED_VECTORS_PATH = Path(os.getenv("CONSOLIDATED_VECTORS_PATH", str(BASE_DIR / "all_vectors.npy"))).resolve()
 
 # Allowed file extensions

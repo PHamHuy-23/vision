@@ -1,10 +1,11 @@
 import os
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+# os.environ['OMP_NUM_THREADS'] = '1'
+# os.environ['MKL_NUM_THREADS'] = '1'
+# os.environ['OPENBLAS_NUM_THREADS'] = '1'
 
 import torch
-torch.set_num_threads(1)
+# torch.set_num_threads(1)
 
 import os
 import sys
@@ -26,10 +27,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from .agy_session import AgySession, session_pool
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+import asyncio
+from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str
 
 from .config import DATA_ROOT, DB_PATH, CONSOLIDATED_VECTORS_PATH, BASE_DIR, HOST, PORT, CORS_ORIGINS
 from .sqlite_engine import SQLiteSearchEngine as VectorSearchEngine
-from .db import IndexDatabase
 from .supabase_service import SupabaseService
 
 ssl_context = ssl.create_default_context()
@@ -56,7 +64,6 @@ app.add_middleware(
 
 data_root_path = Path(DATA_ROOT).resolve()
 search_engine = VectorSearchEngine(data_root=data_root_path)
-db = IndexDatabase(DB_PATH)
 supabase_svc = SupabaseService(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY)
 
 frontend_dir = BASE_DIR / "frontend"
@@ -77,6 +84,20 @@ class SearchRequest(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     print("[Startup] Video Retrieval & Supabase Backend online!", flush=True)
+    import asyncio
+    print("[Startup] Loading OpenCLIP model to memory...", flush=True)
+    search_engine.load_clip_model()
+    print("[Startup] OpenCLIP model loaded!", flush=True)
+    print("[Startup] Pre-warming Flash model...", flush=True)
+    if "local-flash" not in session_pool:
+        session_flash = AgySession("local-flash", model="flash")
+        session_pool["local-flash"] = session_flash
+        await session_flash.start()
+    print("[Startup] Pre-warming Pro model...", flush=True)
+    if "local-pro" not in session_pool:
+        session_pro = AgySession("local-pro", model="pro")
+        session_pool["local-pro"] = session_pro
+        await session_pro.start()
 
 
 @app.get("/")
@@ -100,7 +121,7 @@ def health_check():
         "supabase_connected": supabase_svc.is_configured,
         "database_connected": DB_PATH.exists(),
         "vector_matrix_loaded": CONSOLIDATED_VECTORS_PATH.exists(),
-        "total_keyframes": db.get_all_count() or 173605
+        "total_keyframes": 177321
     }
 
 
@@ -243,10 +264,57 @@ async def search_by_image(file: UploadFile = File(...), top_k: int = Form(50), v
         "results": results
     }
 
+@app.post("/api/v1/chat")
+async def chat_endpoint(req: ChatRequest):
+    # Model Routing Logic
+    msg_lower = req.message.lower()
+    is_complex = any(kw in msg_lower for kw in ["sau đó", "trước khi", "tiếp theo", "rồi", "khi", "lúc"]) or len(req.message.split()) > 15
+    
+    # Force use pre-warmed routed session instead of frontend's static ID
+    sid = "local-pro" if is_complex else "local-flash"
+    
+    if sid not in session_pool:
+        session = AgySession(sid, model="pro" if is_complex else "flash")
+        session_pool[sid] = session
+        await session.start()
+    else:
+        session = session_pool[sid]
+
+    async def gen():
+        try:
+            async for chunk in session.send_message(req.message):
+                yield chunk
+        except Exception as e:
+            yield f"data: [ERROR] Lỗi hệ thống: {str(e)}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
 @app.post("/api/v1/search")
 def search_keyframes(req: SearchRequest):
+    import time
+    start_time = time.time()
+    
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query string cannot be empty")
+
+    # Auto-translate Vietnamese to English for semantic search
+    if req.mode in ["semantic", "smart", "hierarchical"]:
+        import re
+        if re.search(r'[áàãạảâấầẫậẩăắằẵặẳéèẽẹẻêếềễệểíìĩịỉóòõọỏôốồỗộổơớờỡợởúùũụủưứừữựửýỳỹỵỷđ]', req.query.lower()):
+            try:
+                from deep_translator import GoogleTranslator
+                translated = GoogleTranslator(source='vi', target='en').translate(req.query)
+                print(f"[Translator|Google] '{req.query}' -> '{translated}'", flush=True)
+                req.query = translated
+            except Exception as e:
+                print(f"[Translator|Google] Failed: {e}. Trying fallback...", flush=True)
+                try:
+                    from deep_translator import MyMemoryTranslator
+                    translated = MyMemoryTranslator(source='vi-VN', target='en-US').translate(req.query)
+                    print(f"[Translator|MyMemory] '{req.query}' -> '{translated}'", flush=True)
+                    req.query = translated
+                except Exception as e2:
+                    print(f"[Translator|MyMemory] Failed: {e2}", flush=True)
 
     if "->" in req.query:
         queries = [q.strip() for q in req.query.split("->") if q.strip()]
@@ -254,14 +322,23 @@ def search_keyframes(req: SearchRequest):
             queries=queries,
             top_k=req.top_k
         )
+        print(f"[Search API] Temporal search took {time.time() - start_time:.3f}s", flush=True)
     elif req.mode == "ocr":
         results = search_engine.exact_ocr_search(
             query_text=req.query,
             top_k=req.top_k,
             video_id_filter=req.video_id
         )
+        print(f"[Search API] OCR search took {time.time() - start_time:.3f}s", flush=True)
     elif req.mode == "asr":
         results = search_engine.exact_asr_search(
+            query_text=req.query,
+            top_k=req.top_k,
+            video_id_filter=req.video_id
+        )
+        print(f"[Search API] ASR search took {time.time() - start_time:.3f}s", flush=True)
+    elif req.mode == "hybrid":
+        results = search_engine.hybrid_search(
             query_text=req.query,
             top_k=req.top_k,
             video_id_filter=req.video_id

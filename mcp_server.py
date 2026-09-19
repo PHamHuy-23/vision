@@ -1,0 +1,131 @@
+import sys
+import httpx
+from typing import Optional, List, Dict, Any
+from mcp.server.fastmcp import FastMCP
+
+# Khởi tạo MCP Server
+mcp = FastMCP("VideoRetrievalSystem")
+
+API_BASE = "http://localhost:8000"
+
+def format_results(results: List[Dict[str, Any]]) -> str:
+    if not results:
+        return "No results found."
+    output = []
+    for i, r in enumerate(results):
+        score = r.get('score', 0)
+        vid = r.get('video_id', 'unknown')
+        frame = r.get('frame_idx', 0)
+        time = r.get('timestamp', '00:00')
+        img_url = r.get('image_path', '')
+        
+        info = f"[{i+1}] Video: {vid} | Frame: {frame} | Time: {time} | Match: {score}%"
+        
+        if r.get('ocr_text'):
+            info += f"\n    OCR Text: {r['ocr_text']}"
+        if r.get('asr_text'):
+            info += f"\n    Dialog/Voice: {r['asr_text']}"
+        if img_url:
+            info += f"\n    Image URL: {img_url}"
+            
+        output.append(info)
+    
+    return "\n".join(output)
+
+@mcp.tool()
+async def search_semantic_video(query: str, top_k: int = 10, video_id: Optional[str] = None) -> str:
+    """
+    Tìm kiếm khung hình video bằng AI ngữ nghĩa (Mô tả cảnh vật, con người, hành động...).
+    QUAN TRỌNG (CRITICAL): Model CLIP bên dưới chỉ hiểu Tiếng Anh. Bạn bắt buộc phải DỊCH TỪ KHÓA SANG TIẾNG ANH trước khi điền vào biến 'query' (Ví dụ: user nói 'con chó' -> query='dog').
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {"query": query, "top_k": top_k, "mode": "semantic"}
+            if video_id:
+                payload["video_id"] = video_id
+            response = await client.post(f"{API_BASE}/api/v1/search", json=payload, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+            return f"Found {data['total_results']} results for semantic query '{query}':\n" + format_results(data['results'])
+    except Exception as e:
+        return f"Error connecting to backend: {str(e)}"
+
+@mcp.tool()
+async def search_ocr_video(query: str, top_k: int = 10, video_id: Optional[str] = None) -> str:
+    """
+    Tìm kiếm chính xác đoạn text/chữ cái xuất hiện trên màn hình video (Biển báo, phụ đề cứng, chữ...).
+    Lưu ý: Đối với OCR, hãy giữ nguyên ngôn ngữ gốc (thường là Tiếng Việt), KHÔNG dịch.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {"query": query, "top_k": top_k, "mode": "ocr"}
+            if video_id:
+                payload["video_id"] = video_id
+            response = await client.post(f"{API_BASE}/api/v1/search", json=payload, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+            return f"Found {data['total_results']} OCR results for '{query}':\n" + format_results(data['results'])
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+async def search_asr_video(query: str, top_k: int = 10, video_id: Optional[str] = None) -> str:
+    """
+    Tìm kiếm video bằng lời thoại, giọng nói nhân vật (ASR/Subtitle).
+    Lưu ý: Đối với ASR, hãy giữ nguyên ngôn ngữ gốc (Tiếng Việt), KHÔNG dịch.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {"query": query, "top_k": top_k, "mode": "asr"}
+            if video_id:
+                payload["video_id"] = video_id
+            response = await client.post(f"{API_BASE}/api/v1/search", json=payload, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+            return f"Found {data['total_results']} ASR (Voice) results for '{query}':\n" + format_results(data['results'])
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+async def get_frame_context(video_id: str, frame_idx: int, limit: int = 10) -> str:
+    """
+    Xem các khung hình lân cận (Bối cảnh trước/sau) của một frame cụ thể trong video để hiểu diễn biến.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{API_BASE}/api/v1/search/context?video_id={video_id}&frame_idx={frame_idx}&limit={limit}&surrounding=true", timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+            return f"Context frames for Video {video_id} near Frame {frame_idx}:\n" + format_results(data['results'])
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+async def search_image_by_url(image_url: str, top_k: int = 10, video_id: Optional[str] = None) -> str:
+    """
+    Tìm kiếm các khung hình video giống với một BỨC ẢNH MẪU. Nhập URL của ảnh mẫu trên mạng vào đây.
+    Hệ thống sẽ tải ảnh đó về và so sánh bằng AI.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            # 1. Tải ảnh từ URL bên ngoài về RAM
+            img_resp = await client.get(image_url, timeout=15.0)
+            img_resp.raise_for_status()
+            image_bytes = img_resp.content
+
+            # 2. Gửi ảnh (multipart/form-data) cho Backend của mình để search
+            files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
+            data_payload = {"top_k": str(top_k)}
+            if video_id:
+                data_payload["video_id"] = video_id
+                
+            response = await client.post(f"{API_BASE}/api/v1/search/image", data=data_payload, files=files, timeout=40.0)
+            response.raise_for_status()
+            data = response.json()
+            return f"Found {data.get('total_results', len(data.get('results', [])))} results for the provided image:\n" + format_results(data['results'])
+    except Exception as e:
+        return f"Lỗi khi xử lý tìm kiếm ảnh: {str(e)}. Hãy chắc chắn URL ảnh hợp lệ và cho phép tải."
+
+if __name__ == "__main__":
+    # Chạy MCP Server trên giao thức stdio
+    mcp.run()

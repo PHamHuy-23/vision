@@ -17,6 +17,8 @@ from .config import DATA_ROOT, CONSOLIDATED_VECTORS_PATH, CLIP_MODEL_NAME, CLIP_
 
 class SQLiteSearchEngine:
     def __init__(self, data_root: Path = DATA_ROOT, vectors_path: Path = CONSOLIDATED_VECTORS_PATH):
+        self.scene_vectors = None
+        self.chunk_size = 30
         self.data_root = Path(data_root).resolve()
         self.vectors_path = Path(vectors_path).resolve()
         self.db_path = str(self.data_root.parent / "video_index_v2.db")
@@ -46,20 +48,27 @@ class SQLiteSearchEngine:
                 norms[norms == 0] = 1.0
                 self.vectors = vectors_copy / norms
                 print(f"[SQLiteSearchEngine] Loaded vector matrix: {self.vectors.shape}", flush=True)
+                
+                # --- BUILD HIERARCHICAL SCENE INDEX ---
+                import time
+                start_t = time.time()
+                self.chunk_size = 30
+                num_chunks = len(self.vectors) // self.chunk_size
+                if num_chunks > 0:
+                    chunked_vectors = self.vectors[:num_chunks * self.chunk_size].reshape(num_chunks, self.chunk_size, -1)
+                    self.scene_vectors = chunked_vectors.max(axis=1)
+                    scene_norms = np.linalg.norm(self.scene_vectors, axis=1, keepdims=True)
+                    scene_norms[scene_norms == 0] = 1.0
+                    self.scene_vectors = self.scene_vectors / scene_norms
+                    print(f"[SQLiteEngine] Built {num_chunks} Hierarchical Scene Vectors in {time.time() - start_t:.3f}s", flush=True)
+                # --------------------------------------
             except Exception as e:
                 print(f"⚠️ Error loading vectors file {self.vectors_path}: {e}", flush=True)
                 self.vectors = None
 
     def _init_faiss(self):
-        if HAS_FAISS and self.vectors is not None:
-            try:
-                dim = self.vectors.shape[1]
-                self.faiss_index = faiss.IndexFlatIP(dim)
-                self.faiss_index.add(self.vectors)
-                print(f"[FAISS] Initialized FAISS IndexFlatIP with {self.faiss_index.ntotal} vectors (dim={dim}).", flush=True)
-            except Exception as e:
-                print(f"⚠️ Failed initializing FAISS index: {e}", flush=True)
-                self.faiss_index = None
+        # FAISS is extremely slow on this Windows build (10.7s), falling back to optimized NumPy (0.01s)
+        self.faiss_index = None
 
     def load_clip_model(self, model_name: str = CLIP_MODEL_NAME, pretrained: str = CLIP_PRETRAINED):
         if self.model is None:
@@ -107,20 +116,31 @@ class SQLiteSearchEngine:
             top_indices = indices_matrix[0]
         else:
             scores_all = np.dot(self.vectors, query_vec)
-            top_indices = np.argsort(scores_all)[::-1][:top_candidates]
+            # Use argpartition for O(N) top-K selection instead of O(N log N) argsort
+            top_indices = np.argpartition(scores_all, -top_candidates)[-top_candidates:]
+            # Sort only the top_candidates
+            top_indices = top_indices[np.argsort(scores_all[top_indices])[::-1]]
             scores = scores_all[top_indices]
 
         results = []
+        top_candidates_indices = [int(idx) for idx in top_indices]
+        
         with self._get_db() as conn:
             cur = conn.cursor()
+            placeholders = ','.join(['?'] * len(top_candidates_indices))
+            if video_id_filter:
+                query = f"SELECT vector_id, raw_json FROM keyframes WHERE vector_id IN ({placeholders}) AND video_id = ?"
+                cur.execute(query, top_candidates_indices + [video_id_filter])
+            else:
+                query = f"SELECT vector_id, raw_json FROM keyframes WHERE vector_id IN ({placeholders})"
+                cur.execute(query, top_candidates_indices)
+            
+            rows_by_vid = {row['vector_id']: row['raw_json'] for row in cur.fetchall()}
+            
             for idx, score in zip(top_indices, scores):
-                if video_id_filter:
-                    cur.execute("SELECT raw_json FROM keyframes WHERE vector_id = ? AND video_id = ?", (int(idx), video_id_filter))
-                else:
-                    cur.execute("SELECT raw_json FROM keyframes WHERE vector_id = ?", (int(idx),))
-                row = cur.fetchone()
-                if row:
-                    results.append(self._format_result(row['raw_json'], float(score)))
+                idx_int = int(idx)
+                if idx_int in rows_by_vid:
+                    results.append(self._format_result(rows_by_vid[idx_int], float(score)))
                 if len(results) >= top_k:
                     break
         return results
@@ -140,6 +160,16 @@ class SQLiteSearchEngine:
         seconds = int(pts % 60)
 
         gdrive_id = image_data.get("file_id")
+        # Generate R2 URL from rel_path if it exists
+        rel_path = image_data.get("rel_path")
+        if rel_path:
+            # Replace .jpg with .webp since user uploaded compressed webp images to R2
+            if rel_path.endswith(".jpg"):
+                rel_path = rel_path[:-4] + ".webp"
+            r2_url = f"https://pub-63867f61a3cb4f34a8b442399021fbbd.r2.dev/{rel_path}"
+        else:
+            r2_url = ""
+            
         img_url = image_data.get("url") or (f"https://lh3.googleusercontent.com/d/{gdrive_id}" if gdrive_id else "")
 
         ocr_txt_data = ocr_data.get("txt") if isinstance(ocr_data.get("txt"), dict) else {}
@@ -153,6 +183,7 @@ class SQLiteSearchEngine:
             "pts_time": pts,
             "timestamp": f"{minutes:02d}:{seconds:02d} ({pts:.1f}s)",
             "image_path": img_url,
+            "r2_url": r2_url,
             "gdrive_file_id": gdrive_id,
             "score": float(round(score * 100, 2)) if score <= 1.0 else score,
             "ocr_text": ocr_data.get("text", ""),
@@ -172,10 +203,14 @@ class SQLiteSearchEngine:
         if query_vector_id is not None and 0 <= query_vector_id < len(self.vectors):
             query_vec = self.vectors[query_vector_id]
         else:
-            from deep_translator import GoogleTranslator
-            try:
-                translated_text = GoogleTranslator(source='auto', target='en').translate(query_text)
-            except Exception:
+            import re
+            if re.search(r'[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ]', query_text):
+                from deep_translator import GoogleTranslator
+                try:
+                    translated_text = GoogleTranslator(source='auto', target='en').translate(query_text)
+                except Exception:
+                    translated_text = query_text
+            else:
                 translated_text = query_text
                 
             clauses = [c.strip() for c in re.split(r',|;| and ', translated_text) if c.strip()]
@@ -193,20 +228,31 @@ class SQLiteSearchEngine:
             top_indices = indices_matrix[0]
         else:
             scores_all = np.dot(self.vectors, query_vec)
-            top_indices = np.argsort(scores_all)[::-1][:top_candidates]
+            # Use argpartition for O(N) top-K selection instead of O(N log N) argsort
+            top_indices = np.argpartition(scores_all, -top_candidates)[-top_candidates:]
+            # Sort only the top_candidates
+            top_indices = top_indices[np.argsort(scores_all[top_indices])[::-1]]
             scores = scores_all[top_indices]
 
         results = []
+        top_candidates_indices = [int(idx) for idx in top_indices]
+        
         with self._get_db() as conn:
             cur = conn.cursor()
+            placeholders = ','.join(['?'] * len(top_candidates_indices))
+            if video_id_filter:
+                query = f"SELECT vector_id, raw_json FROM keyframes WHERE vector_id IN ({placeholders}) AND video_id = ?"
+                cur.execute(query, top_candidates_indices + [video_id_filter])
+            else:
+                query = f"SELECT vector_id, raw_json FROM keyframes WHERE vector_id IN ({placeholders})"
+                cur.execute(query, top_candidates_indices)
+            
+            rows_by_vid = {row['vector_id']: row['raw_json'] for row in cur.fetchall()}
+            
             for idx, score in zip(top_indices, scores):
-                if video_id_filter:
-                    cur.execute("SELECT raw_json FROM keyframes WHERE vector_id = ? AND video_id = ?", (int(idx), video_id_filter))
-                else:
-                    cur.execute("SELECT raw_json FROM keyframes WHERE vector_id = ?", (int(idx),))
-                row = cur.fetchone()
-                if row:
-                    results.append(self._format_result(row['raw_json'], float(score)))
+                idx_int = int(idx)
+                if idx_int in rows_by_vid:
+                    results.append(self._format_result(rows_by_vid[idx_int], float(score)))
                 if len(results) >= top_k:
                     break
         return results
@@ -312,3 +358,159 @@ class SQLiteSearchEngine:
                     break
         matched_sequences.sort(key=lambda x: x["score"], reverse=True)
         return matched_sequences[:top_k]
+
+    def hybrid_search(self, query_text: str, top_k: int = 50, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        import re
+        ocr_match = re.search(r'ocr:"([^"]+)"', query_text)
+        asr_match = re.search(r'asr:"([^"]+)"', query_text)
+        
+        ocr_query = ocr_match.group(1) if ocr_match else None
+        asr_query = asr_match.group(1) if asr_match else None
+        
+        semantic_query = query_text
+        if ocr_match: semantic_query = semantic_query.replace(ocr_match.group(0), '')
+        if asr_match: semantic_query = semantic_query.replace(asr_match.group(0), '')
+        semantic_query = semantic_query.strip()
+        
+        results_semantic = []
+        results_ocr = []
+        results_asr = []
+        
+        if semantic_query:
+            results_semantic = self.search(semantic_query, top_k=top_k*2, video_id_filter=video_id_filter)
+        if ocr_query:
+            results_ocr = self.exact_ocr_search(ocr_query, top_k=top_k*2, video_id_filter=video_id_filter)
+        if asr_query:
+            results_asr = self.exact_asr_search(asr_query, top_k=top_k*2, video_id_filter=video_id_filter)
+            
+        lists = []
+        if results_semantic: lists.append(results_semantic)
+        if results_ocr: lists.append(results_ocr)
+        if results_asr: lists.append(results_asr)
+        
+        if not lists: return []
+        if len(lists) == 1: return lists[0][:top_k]
+        
+        # Intersection & Borda Count logic
+        score_map = {}
+        for lst in lists:
+            for rank, item in enumerate(lst):
+                key = (item['video_id'], item['frame_idx'])
+                if key not in score_map:
+                    score_map[key] = {'item': item, 'count': 0, 'score': 0}
+                score_map[key]['count'] += 1
+                score_map[key]['score'] += (1000 - rank)
+                
+        # Sort by count (intersection) then score
+        sorted_items = sorted(score_map.values(), key=lambda x: (x['count'], x['score']), reverse=True)
+        
+        final_results = [x['item'] for x in sorted_items if x['count'] > 1] # Require at least 2 modalities to match
+        
+        # If intersection is empty, fallback to the best scores from all
+        if not final_results:
+            final_results = [x['item'] for x in sorted_items]
+            
+        return final_results[:top_k]
+
+    def temporal_window_search(self, query_text: str, window_size: int = 5, top_k: int = 20, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        # Fetch a large pool of candidates
+        raw_results = self.search(query_text, top_k=top_k * 10, video_id_filter=video_id_filter)
+        
+        # Group by video_id
+        from collections import defaultdict
+        video_groups = defaultdict(list)
+        for item in raw_results:
+            video_groups[item['video_id']].append(item)
+            
+        segments = []
+        for vid, items in video_groups.items():
+            # Sort items by frame_idx
+            items.sort(key=lambda x: x['frame_idx'])
+            
+            # Simple sliding window grouping
+            current_segment = []
+            for item in items:
+                if not current_segment:
+                    current_segment.append(item)
+                else:
+                    last_frame = current_segment[-1]['frame_idx']
+                    # If within window_size (assuming frame_idx is sequential, 1 frame = ~1 sec or depending on extraction rate)
+                    # Let's say if it's within 10 frames
+                    if item['frame_idx'] - last_frame <= window_size:
+                        current_segment.append(item)
+                    else:
+                        # Compute score for segment
+                        avg_score = sum(x['score'] for x in current_segment) / len(current_segment)
+                        # Boost score based on how many frames matched
+                        boosted_score = avg_score * (1 + 0.1 * len(current_segment))
+                        
+                        best_item = max(current_segment, key=lambda x: x['score'])
+                        best_item_copy = dict(best_item)
+                        best_item_copy['score'] = boosted_score
+                        best_item_copy['segment_frames'] = len(current_segment)
+                        segments.append(best_item_copy)
+                        current_segment = [item]
+                        
+            if current_segment:
+                avg_score = sum(x['score'] for x in current_segment) / len(current_segment)
+                boosted_score = avg_score * (1 + 0.1 * len(current_segment))
+                best_item = max(current_segment, key=lambda x: x['score'])
+                best_item_copy = dict(best_item)
+                best_item_copy['score'] = boosted_score
+                best_item_copy['segment_frames'] = len(current_segment)
+                segments.append(best_item_copy)
+                
+        # Sort all segments by boosted score
+        segments.sort(key=lambda x: x['score'], reverse=True)
+        return segments[:top_k]
+
+    def hierarchical_search(self, query_text: str, top_k: int = 50, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Two-stage Coarse-to-Fine Search (Hierarchical Retrieval)
+        Stage 1: Search ~6,000 Scene Vectors (Ultra fast)
+        Stage 2: Search exact frames within the Top 50 Scenes
+        """
+        if self.scene_vectors is None or video_id_filter is not None:
+            # Fallback to standard search if filtering or not initialized
+            return self.search(query_text, top_k=top_k, video_id_filter=video_id_filter)
+            
+        query_vector = self.encode_text(query_text).astype(np.float32)
+        
+        # 1. Coarse Search
+        scene_scores = np.dot(self.scene_vectors, query_vector.T).squeeze()
+        # Get top K scenes (multiply by 2 to ensure we have enough candidates)
+        top_scene_indices = np.argsort(scene_scores)[::-1][:top_k * 2]
+        
+        # 2. Fine Search
+        candidate_indices = []
+        for s_idx in top_scene_indices:
+            start_idx = s_idx * self.chunk_size
+            candidate_indices.extend(range(start_idx, start_idx + self.chunk_size))
+            
+        candidate_indices = np.array(candidate_indices)
+        candidate_vectors = self.vectors[candidate_indices]
+        
+        exact_scores = np.dot(candidate_vectors, query_vector.T).squeeze()
+        
+        # Sort and get Top K
+        best_local = np.argsort(exact_scores)[::-1][:top_k]
+        best_global = candidate_indices[best_local]
+        best_scores = exact_scores[best_local]
+        
+        # Fetch metadata from SQLite
+        best_global_list = best_global.tolist()
+        placeholders = ','.join(['?'] * len(best_global_list))
+        query = f"SELECT vector_id, raw_json FROM keyframes WHERE vector_id IN ({placeholders})"
+        
+        results = []
+        with self._get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(query, best_global_list)
+            rows_by_vid = {row['vector_id']: row['raw_json'] for row in cur.fetchall()}
+            
+            for idx, score in zip(best_global_list, best_scores):
+                if idx in rows_by_vid:
+                    res = self._format_result(rows_by_vid[idx], float(score))
+                    results.append(res)
+                    
+        return results
