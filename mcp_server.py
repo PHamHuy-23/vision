@@ -9,14 +9,48 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
+import io
+
 import httpx
 from typing import Optional, List, Dict, Any
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
+from PIL import Image as PILImage, ImageDraw
 
 # Khởi tạo MCP Server
 mcp = FastMCP("VideoRetrievalSystem")
 
 API_BASE = "http://127.0.0.1:8000"
+
+
+def _build_vision_probe(variant: str) -> bytes:
+    """Create a deterministic image for verifying MCP vision end to end."""
+    normalized = variant.strip().lower()
+    if normalized not in {"probe_a", "probe_b"}:
+        raise ValueError("variant must be either 'probe_a' or 'probe_b'")
+
+    canvas = PILImage.new("RGB", (768, 512), "white")
+    draw = ImageDraw.Draw(canvas)
+    if normalized == "probe_a":
+        draw.rectangle((70, 70, 330, 330), fill=(220, 35, 45))
+        draw.ellipse((430, 120, 650, 340), fill=(255, 205, 35))
+    else:
+        draw.polygon([(180, 360), (360, 70), (540, 360)], fill=(30, 105, 220))
+        draw.rectangle((585, 120, 685, 340), fill=(35, 180, 90))
+
+    output = io.BytesIO()
+    canvas.save(output, format="JPEG", quality=90, optimize=True)
+    return output.getvalue()
+
+
+@mcp.tool()
+def inspect_vision_probe(variant: str = "probe_a") -> Image:
+    """
+    Return a real image through MCP for a vision-capability test.
+
+    The variant is an opaque test ID: `probe_a` or `probe_b`. Describe the
+    visible colors and shapes without inferring them from the ID.
+    """
+    return Image(data=_build_vision_probe(variant), format="jpeg")
 
 def format_results(results: List[Dict[str, Any]]) -> str:
     if not results:
