@@ -30,12 +30,17 @@ class AgySession:
         elif self.model:
             cmd.extend(["--model", self.model])
 
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
         self.proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=WORKING_DIR,
+            env=env,
         )
         # Drain init event (process ready signal)
         try:
@@ -67,6 +72,7 @@ STRICT EFFICIENCY & TIMING RULES (CRITICAL):
 2. STRICT STEP BUDGET: Use at most 1-2 tool calls in total. NEVER loop more than 2 times. Once you have candidate frames, synthesize your answer immediately. Do not keep searching repeatedly.
 3. FORMAT CANDIDATES: Whenever recommending a frame, ALWAYS format as `VideoID, FrameIdx` (e.g. `L21_V008, 13725`). The frontend system will automatically turn this format into an interactive card with a preview button for the user! Provide 2 to 5 top candidates.
 4. CONCISE ANSWER: Explain briefly in natural Vietnamese why each recommended candidate matches the request. Be helpful, clear, and direct.
+5. NO CODING TOOLS: NEVER use `run_command`, `read_file`, `write_to_file`, `view_file`, or any terminal tools. You are strictly a video retrieval conversational assistant. Use ONLY `call_mcp_tool` for video searching.
 
 [ACTUAL USER REQUEST]
 {message}"""

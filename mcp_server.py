@@ -1,4 +1,14 @@
+import os
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+
 import sys
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import httpx
 from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP
