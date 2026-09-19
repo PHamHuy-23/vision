@@ -32,7 +32,7 @@ from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: str
+    session_id: Optional[str] = "local-user"
 
 from .config import DATA_ROOT, DB_PATH, CONSOLIDATED_VECTORS_PATH, BASE_DIR, HOST, PORT, CORS_ORIGINS
 from .sqlite_engine import SQLiteSearchEngine as VectorSearchEngine
