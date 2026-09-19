@@ -57,6 +57,26 @@ async def verify() -> None:
                     f"jpeg_bytes={len(decoded)}"
                 )
 
+            sequence = await session.call_tool(
+                "inspect_video_sequence",
+                {
+                    "video_id": candidates[0]["video_id"],
+                    "center_frame": candidates[0]["frame_idx"],
+                    "limit": 12,
+                    "columns": 4,
+                },
+            )
+            assert not sequence.isError, sequence.content
+            sequence_content = sequence.content[0]
+            assert sequence_content.type == "image"
+            sequence_decoded = base64.b64decode(sequence_content.data)
+            with Image.open(io.BytesIO(sequence_decoded)) as sequence_sheet:
+                assert sequence_sheet.size == (1280, 666)
+                print(
+                    f"sequence_size={sequence_sheet.size}, "
+                    f"jpeg_bytes={len(sequence_decoded)}"
+                )
+
 
 if __name__ == "__main__":
     asyncio.run(verify())

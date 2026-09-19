@@ -12,6 +12,10 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 
 import io
 import math
+import json
+import sqlite3
+from collections import defaultdict
+from pathlib import Path
 
 import httpx
 from typing import Optional, List, Dict, Any
@@ -22,6 +26,7 @@ from PIL import Image as PILImage, ImageDraw, ImageOps
 mcp = FastMCP("VideoRetrievalSystem")
 
 API_BASE = "http://127.0.0.1:8000"
+DB_PATH = Path(__file__).resolve().with_name("video_index_v2.db")
 
 
 def _build_vision_probe(variant: str) -> bytes:
@@ -72,7 +77,7 @@ async def _resolve_candidate(
     )
     response.raise_for_status()
     results = response.json().get("results", [])
-    if not results or int(results[0].get("frame_idx", -1)) != frame_idx:
+    if not results:
         raise ValueError(f"frame not found: {video_id}, {frame_idx}")
     return results[0]
 
@@ -178,6 +183,41 @@ async def inspect_candidate_grid(
         )
     return Image(data=_render_candidate_grid(list(frames), columns), format="jpeg")
 
+
+@mcp.tool()
+async def inspect_video_sequence(
+    video_id: str, center_frame: int, limit: int = 12, columns: int = 4
+) -> Image:
+    """
+    Visually inspect a chronological sequence around one candidate frame.
+
+    Use this once after a candidate grid when a multi-event query needs proof
+    that visible actions belong to the same video. The sheet is ordered from
+    earlier to later stored keyframes; cite its labels as direct evidence.
+    """
+    limit = max(4, min(int(limit), 20))
+    columns = max(2, min(int(columns), 5))
+    timeout = httpx.Timeout(12.0, connect=4.0)
+    limits = httpx.Limits(max_connections=8, max_keepalive_connections=8)
+    async with httpx.AsyncClient(timeout=timeout, limits=limits, follow_redirects=True) as client:
+        response = await client.get(
+            f"{API_BASE}/api/v1/video/{video_id}/filmstrip",
+            params={
+                "anchor_frame": int(center_frame),
+                "direction": "around",
+                "limit": limit,
+            },
+        )
+        response.raise_for_status()
+        candidates = response.json().get("results", [])
+        if not candidates:
+            raise ValueError(f"no sequence frames found for {video_id}")
+        semaphore = asyncio.Semaphore(6)
+        frames = await asyncio.gather(
+            *(_download_candidate_image(client, semaphore, candidate) for candidate in candidates)
+        )
+    return Image(data=_render_candidate_grid(list(frames), columns), format="jpeg")
+
 def format_results(results: List[Dict[str, Any]], limit: int = 20) -> str:
     if not results:
         return "Không tìm thấy kết quả phù hợp."
@@ -253,6 +293,118 @@ async def search_asr_video(query: str, top_k: int = 5, video_id: Optional[str] =
             return f"Found {data['total_results']} ASR results for '{query}':\n" + format_results(data['results'])
     except Exception as e:
         return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def search_video_evidence(
+    terms: List[str], top_videos: int = 5, frames_per_video: int = 4
+) -> str:
+    """
+    Recall videos that contain several independent OCR/ASR evidence terms.
+
+    Use once for a multi-event query with 2-6 short Vietnamese concepts such
+    as ingredient or action words. This is candidate recall only, never visual
+    proof: inspect the returned video/frame pairs with an image tool.
+    """
+    clean_terms = []
+    for term in terms:
+        normalized = " ".join(str(term).strip().split())
+        if normalized and normalized not in clean_terms:
+            clean_terms.append(normalized)
+    if not 2 <= len(clean_terms) <= 6:
+        raise ValueError("terms must contain 2-6 distinct short concepts")
+    top_videos = max(1, min(int(top_videos), 8))
+    frames_per_video = max(1, min(int(frames_per_video), 5))
+
+    def search_all_terms():
+        batches = []
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            for term in clean_terms:
+                match_expr = f'"{term.replace(chr(34), chr(34) * 2)}"'
+                for mode, table in (("asr", "asr_fts"), ("ocr", "ocr_fts")):
+                    rows = conn.execute(
+                        f"""
+                        SELECT k.video_id, k.frame_idx, k.raw_json
+                        FROM {table}
+                        JOIN keyframes AS k ON k.vector_id = {table}.vector_id
+                        WHERE {table} MATCH ?
+                        """,
+                        (match_expr,),
+                    ).fetchall()
+                    results = []
+                    for row in rows:
+                        raw = json.loads(row["raw_json"])
+                        timestamp = raw.get("timestamp", {})
+                        pts = float(timestamp.get("pts_time", 0.0))
+                        results.append(
+                            {
+                                "video_id": row["video_id"],
+                                "frame_idx": row["frame_idx"],
+                                "timestamp": f"{int(pts // 60):02d}:{int(pts % 60):02d} ({pts:.1f}s)",
+                            }
+                        )
+                    batches.append((term, mode, results))
+        return batches
+
+    batches = await asyncio.to_thread(search_all_terms)
+
+    matched_terms: Dict[str, set[str]] = defaultdict(set)
+    frame_evidence: Dict[str, Dict[tuple[str, int], Dict[str, Any]]] = defaultdict(dict)
+    hit_counts: Dict[str, int] = defaultdict(int)
+    for term, mode, results in batches:
+        seen_video_for_term = set()
+        for result in results:
+            video_id = str(result.get("video_id", ""))
+            frame_idx = int(result.get("frame_idx", 0))
+            if not video_id:
+                continue
+            matched_terms[video_id].add(term)
+            if video_id not in seen_video_for_term:
+                hit_counts[video_id] += 1
+                seen_video_for_term.add(video_id)
+            key = (term, frame_idx)
+            frame_evidence[video_id].setdefault(
+                key,
+                {
+                    "term": term,
+                    "mode": mode,
+                    "frame_idx": frame_idx,
+                    "timestamp": result.get("timestamp", ""),
+                },
+            )
+
+    ranked = sorted(
+        matched_terms,
+        key=lambda video_id: (
+            len(matched_terms[video_id]),
+            hit_counts[video_id],
+        ),
+        reverse=True,
+    )[:top_videos]
+    if not ranked:
+        return "No OCR/ASR evidence candidates found."
+
+    lines = ["Metadata evidence for candidate recall only; visually verify every claim:"]
+    for rank, video_id in enumerate(ranked, 1):
+        evidence = list(frame_evidence[video_id].values())
+        selected = []
+        used_terms = set()
+        for item in evidence:
+            if item["term"] not in used_terms:
+                selected.append(item)
+                used_terms.add(item["term"])
+            if len(selected) >= frames_per_video:
+                break
+        frames = "; ".join(
+            f"{item['term']}=>{video_id}, {item['frame_idx']} ({item['timestamp']})"
+            for item in selected
+        )
+        lines.append(
+            f"[{rank}] {video_id} matched {len(matched_terms[video_id])}/{len(clean_terms)} "
+            f"terms ({', '.join(sorted(matched_terms[video_id]))}); frames: {frames}"
+        )
+    return "\n".join(lines)
 
 @mcp.tool()
 async def get_frame_context(video_id: str, frame_idx: int, limit: int = 5) -> str:
