@@ -336,6 +336,13 @@
                 <img id="modalImg" class="h-[75vh] w-auto max-w-full object-contain rounded shadow-2xl cursor-grab select-none transition-transform duration-200" src="" alt="Preview" draggable="false">
                 <div id="bboxesOverlay" class="absolute top-0 left-0 w-full h-full pointer-events-none overflow-hidden rounded"></div>
             </div>
+            <div id="filmstrip" class="w-full max-w-5xl mb-4 hidden">
+                <div class="flex items-center gap-2">
+                    <button id="filmstripPrev" class="shrink-0 text-white/70 hover:text-white text-2xl px-2" type="button">‹</button>
+                    <div id="filmstripTrack" class="flex-1 flex items-center gap-2 overflow-x-auto py-2 px-1 scroll-smooth"></div>
+                    <button id="filmstripNext" class="shrink-0 text-white/70 hover:text-white text-2xl px-2" type="button">›</button>
+                </div>
+            </div>
             <div class="text-center bg-gray-900/80 px-6 py-3 rounded-xl border border-gray-700">
                 <h3 id="modalVideoId" class="text-2xl font-bold text-blue-400 mb-1"></h3>
                 <p id="modalDetails" class="text-gray-300 text-lg font-mono"></p>
@@ -401,12 +408,67 @@
         document.getElementById('modalClose').onclick = () => {
             document.getElementById('previewModal').classList.add('hidden');
             document.getElementById('videoIframe').src = ''; // Dừng phát video khi đóng modal
+            document.getElementById('filmstrip').classList.add('hidden');
         };
+        document.getElementById('filmstripPrev').onclick = () => document.getElementById('filmstripTrack').scrollBy({ left: -420, behavior: 'smooth' });
+        document.getElementById('filmstripNext').onclick = () => document.getElementById('filmstripTrack').scrollBy({ left: 420, behavior: 'smooth' });
         let currentPts = 0;
         let currentVideoId = '';
         let currentPreviewIndex = -1;
         let currentObjId = '';
         let currentOcrId = '';
+        let filmstripFrames = [];
+        let filmstripCenterFrame = null;
+
+        function frameImageUrl(item) {
+            const fileId = item.gdrive_file_id;
+            const path = item.image_path || '';
+            return item.r2_url || (fileId ? `${API_BASE}/api/v1/drive/proxy/${fileId}` : (path.startsWith('http') ? path : ''));
+        }
+
+        function renderFilmstrip() {
+            const strip = document.getElementById('filmstrip');
+            const track = document.getElementById('filmstripTrack');
+            if (!strip || !track || !filmstripFrames.length) return;
+            strip.classList.remove('hidden');
+            track.innerHTML = filmstripFrames.map((item) => {
+                const active = Number(item.frame_idx) === Number(filmstripCenterFrame);
+                return `<button type="button" data-frame="${item.frame_idx}" class="film-frame shrink-0 w-24 ${active ? 'ring-2 ring-blue-400 scale-105' : 'opacity-70 hover:opacity-100'} rounded overflow-hidden bg-gray-800 transition" title="Frame ${item.frame_idx}">
+                    <img src="${frameImageUrl(item)}" class="w-24 h-14 object-contain" loading="lazy" alt="Frame ${item.frame_idx}">
+                    <span class="block text-[10px] text-gray-300 font-mono py-0.5">${item.timestamp || item.frame_idx}</span>
+                </button>`;
+            }).join('');
+            track.querySelectorAll('.film-frame').forEach(btn => btn.onclick = () => {
+                const item = filmstripFrames.find(x => Number(x.frame_idx) === Number(btn.dataset.frame));
+                if (item) selectFilmstripFrame(item);
+            });
+            const active = track.querySelector(`[data-frame="${filmstripCenterFrame}"]`);
+            if (active) active.scrollIntoView({ behavior: 'instant', block: 'nearest', inline: 'center' });
+        }
+
+        function selectFilmstripFrame(item) {
+            filmstripCenterFrame = item.frame_idx;
+            currentPts = item.pts_time || 0;
+            currentObjId = item.object_file_id || '';
+            currentOcrId = item.ocr_json_id || '';
+            const img = document.getElementById('modalImg');
+            img.src = frameImageUrl(item);
+            document.getElementById('modalDetails').textContent = `Frame: ${item.frame_idx} | Timestamp: ${item.timestamp || 'N/A'} | Similarity: ${item.score != null ? Number(item.score).toFixed(1) + '%' : 'N/A'}`;
+            document.getElementById('bboxesOverlay').innerHTML = '';
+            renderFilmstrip();
+        }
+
+        async function loadFilmstrip(videoId, frameIdx) {
+            const strip = document.getElementById('filmstrip');
+            if (strip) strip.classList.add('hidden');
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/search/context?video_id=${encodeURIComponent(videoId)}&frame_idx=${encodeURIComponent(frameIdx)}&limit=21&surrounding=true`);
+                const data = await res.json();
+                filmstripFrames = data.results || [];
+                filmstripCenterFrame = frameIdx;
+                renderFilmstrip();
+            } catch (err) { console.warn('Filmstrip load failed', err); }
+        }
 
         window.drawBboxes = async () => {
             const overlay = document.getElementById('bboxesOverlay');
@@ -519,6 +581,7 @@
             document.getElementById('videoIframe').src = '';
             document.getElementById('previewImageContainer').style.display = 'inline-block';
             document.getElementById('previewModal').classList.remove('hidden');
+            loadFilmstrip(videoId, Number((details.match(/Frame:\s*([\d.]+)/) || [])[1]) || 0);
             
             const btn = document.getElementById('btnPlayVideo');
             if (btn) {
