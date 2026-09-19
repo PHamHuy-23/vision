@@ -1,3 +1,4 @@
+import asyncio
 import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -10,11 +11,12 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
         pass
 
 import io
+import math
 
 import httpx
 from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP, Image
-from PIL import Image as PILImage, ImageDraw
+from PIL import Image as PILImage, ImageDraw, ImageOps
 
 # Khởi tạo MCP Server
 mcp = FastMCP("VideoRetrievalSystem")
@@ -52,11 +54,135 @@ def inspect_vision_probe(variant: str = "probe_a") -> Image:
     """
     return Image(data=_build_vision_probe(variant), format="jpeg")
 
-def format_results(results: List[Dict[str, Any]]) -> str:
+
+async def _resolve_candidate(
+    client: httpx.AsyncClient, candidate: Dict[str, Any]
+) -> Dict[str, Any]:
+    video_id = str(candidate.get("video_id", "")).strip()
+    try:
+        frame_idx = int(candidate.get("frame_idx"))
+    except (TypeError, ValueError):
+        raise ValueError("each candidate requires an integer frame_idx")
+    if not video_id:
+        raise ValueError("each candidate requires a video_id")
+
+    response = await client.get(
+        f"{API_BASE}/api/v1/search/context",
+        params={"video_id": video_id, "frame_idx": frame_idx, "limit": 1},
+    )
+    response.raise_for_status()
+    results = response.json().get("results", [])
+    if not results or int(results[0].get("frame_idx", -1)) != frame_idx:
+        raise ValueError(f"frame not found: {video_id}, {frame_idx}")
+    return results[0]
+
+
+async def _download_candidate_image(
+    client: httpx.AsyncClient,
+    semaphore: asyncio.Semaphore,
+    candidate: Dict[str, Any],
+) -> tuple[Dict[str, Any], PILImage.Image]:
+    image_url = candidate.get("r2_url") or candidate.get("image_path")
+    if not image_url:
+        raise ValueError(
+            f"candidate has no image URL: {candidate['video_id']}, "
+            f"{candidate['frame_idx']}"
+        )
+    allowed_hosts = {
+        "pub-63867f61a3cb4f34a8b442399021fbbd.r2.dev",
+        "lh3.googleusercontent.com",
+    }
+    parsed = httpx.URL(image_url)
+    if parsed.scheme != "https" or parsed.host not in allowed_hosts:
+        raise ValueError(f"unsupported image host: {parsed.host}")
+
+    async with semaphore:
+        last_error: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                response = await client.get(image_url)
+                response.raise_for_status()
+                break
+            except (httpx.HTTPError, httpx.TimeoutException) as exc:
+                last_error = exc
+                if attempt == 0:
+                    await asyncio.sleep(0.2)
+        else:
+            raise ValueError(f"failed to download candidate image: {last_error}")
+    if len(response.content) > 8 * 1024 * 1024:
+        raise ValueError("candidate image exceeds 8 MB")
+    image = PILImage.open(io.BytesIO(response.content)).convert("RGB")
+    return candidate, image
+
+
+def _render_candidate_grid(
+    frames: List[tuple[Dict[str, Any], PILImage.Image]], columns: int
+) -> bytes:
+    tile_width, image_height, label_height = 320, 180, 42
+    rows = math.ceil(len(frames) / columns)
+    sheet = PILImage.new(
+        "RGB", (columns * tile_width, rows * (image_height + label_height)), "#111827"
+    )
+    draw = ImageDraw.Draw(sheet)
+    for index, (candidate, source) in enumerate(frames):
+        x = (index % columns) * tile_width
+        y = (index // columns) * (image_height + label_height)
+        tile = ImageOps.pad(
+            source, (tile_width, image_height), method=PILImage.Resampling.LANCZOS,
+            color="#030712",
+        )
+        sheet.paste(tile, (x, y))
+        label = (
+            f"{index + 1:02d}  {candidate['video_id']}  "
+            f"F{candidate['frame_idx']}  {candidate.get('timestamp', '')}"
+        )
+        draw.rectangle((x, y + image_height, x + tile_width, y + image_height + label_height), fill="#111827")
+        draw.text((x + 8, y + image_height + 12), label, fill="white")
+
+    output = io.BytesIO()
+    sheet.save(output, format="JPEG", quality=85, optimize=True)
+    return output.getvalue()
+
+
+@mcp.tool()
+async def inspect_candidate_grid(
+    candidates: List[Dict[str, Any]], columns: int = 4
+) -> Image:
+    """
+    Visually inspect 1-20 video candidates in one labeled contact sheet.
+
+    Each candidate must contain only `video_id` and `frame_idx`, copied from
+    search results. Labels use the form `NN video_id Fframe timestamp`; cite
+    these labels when reporting visual evidence.
+    """
+    if not 1 <= len(candidates) <= 20:
+        raise ValueError("candidates must contain between 1 and 20 items")
+    columns = max(2, min(int(columns), 5))
+    unique: List[Dict[str, Any]] = []
+    seen = set()
+    for candidate in candidates:
+        key = (str(candidate.get("video_id", "")).strip(), candidate.get("frame_idx"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+
+    timeout = httpx.Timeout(12.0, connect=4.0)
+    limits = httpx.Limits(max_connections=8, max_keepalive_connections=8)
+    async with httpx.AsyncClient(timeout=timeout, limits=limits, follow_redirects=True) as client:
+        resolved = await asyncio.gather(
+            *(_resolve_candidate(client, candidate) for candidate in unique)
+        )
+        semaphore = asyncio.Semaphore(6)
+        frames = await asyncio.gather(
+            *(_download_candidate_image(client, semaphore, candidate) for candidate in resolved)
+        )
+    return Image(data=_render_candidate_grid(list(frames), columns), format="jpeg")
+
+def format_results(results: List[Dict[str, Any]], limit: int = 20) -> str:
     if not results:
         return "Không tìm thấy kết quả phù hợp."
     output = []
-    for i, r in enumerate(results[:5]):
+    for i, r in enumerate(results[:max(1, min(limit, 20))]):
         score = r.get('score', 0)
         vid = r.get('video_id', 'unknown')
         frame = r.get('frame_idx', 0)
