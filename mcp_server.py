@@ -6,7 +6,7 @@ from mcp.server.fastmcp import FastMCP
 # Khởi tạo MCP Server
 mcp = FastMCP("VideoRetrievalSystem")
 
-API_BASE = "http://localhost:8000"
+API_BASE = "http://127.0.0.1:8000"
 
 def format_results(results: List[Dict[str, Any]]) -> str:
     if not results:

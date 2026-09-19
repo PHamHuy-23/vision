@@ -17,14 +17,24 @@ class AgySession:
         self.is_first_message = True
 
     async def start(self):
-        self.proc = await asyncio.create_subprocess_exec(
+        cmd = [
             AGY_PATH,
             "--dangerously-skip-permissions",
             "--input-format", "stream-json",
             "--output-format", "stream-json",
+        ]
+        if self.model == "flash":
+            cmd.extend(["--model", "gemini-3.8-flash-low", "--effort", "low"])
+        elif self.model == "pro":
+            cmd.extend(["--model", "gemini-3.8-flash-medium", "--effort", "medium"])
+        elif self.model:
+            cmd.extend(["--model", self.model])
+
+        self.proc = await asyncio.create_subprocess_exec(
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
             cwd=WORKING_DIR,
         )
         # Drain init event (process ready signal)
