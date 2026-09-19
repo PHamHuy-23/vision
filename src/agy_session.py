@@ -7,6 +7,10 @@ AGY_PATH = r"C:\Users\ADMIN\AppData\Local\agy\bin\agy.exe"
 WORKING_DIR = r"G:\Desktop\vision"
 
 class AgySession:
+    # Hard upper bound for one assistant turn.  The prompt budget alone is not
+    # sufficient because a stalled tool/model process can otherwise hold the
+    # HTTP stream open for minutes.
+    RESPONSE_TIMEOUT_SECONDS = 15.0
     """1 persistent agy process = 1 conversation thread"""
 
     def __init__(self, session_id: str, model: str = None):
@@ -96,10 +100,11 @@ STRICT EFFICIENCY & TIMING RULES (CRITICAL):
         while True:
             try:
                 line = await asyncio.wait_for(
-                    self.proc.stdout.readline(), timeout=120.0
+                    self.proc.stdout.readline(), timeout=self.RESPONSE_TIMEOUT_SECONDS
                 )
             except asyncio.TimeoutError:
-                yield 'data: [ERROR] Lỗi: Timeout khi đợi phản hồi từ AI.<br>\n\n'
+                yield 'data: [ERROR] Lỗi: AI không phản hồi trong 15 giây. Vui lòng thử lại với câu hỏi ngắn hơn.<br>\n\n'
+                await self.close()
                 break
 
             if not line:
