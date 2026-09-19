@@ -9,6 +9,7 @@ import os
 import sys
 import ssl
 import json
+import time
 import urllib.request
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -78,6 +79,11 @@ class SearchRequest(BaseModel):
     top_k: int = Field(20, ge=1, le=200, description="Number of top matching results to retrieve")
     video_id: Optional[str] = Field(None, description="Optional Video ID filter constraint")
     mode: str = Field("semantic", description="Search mode: semantic, ocr, or asr")
+
+class SearchAllRequest(BaseModel):
+    query: str = Field(..., description="Natural language query")
+    top_k: int = Field(20, ge=1, le=200)
+    video_id: Optional[str] = None
 
 @app.on_event("startup")
 async def startup_event():
@@ -357,6 +363,36 @@ def search_keyframes(req: SearchRequest):
         "total_results": len(results),
         "results": results
     }
+
+def _search_one_mode(query: str, mode: str, top_k: int, video_id: Optional[str]):
+    """Run one independent retrieval branch for the all-modes endpoint."""
+    if mode == "semantic":
+        return search_engine.search(query_text=query, top_k=top_k, video_id_filter=video_id)
+    if mode == "ocr":
+        return search_engine.exact_ocr_search(query, top_k=top_k, video_id_filter=video_id)
+    return search_engine.exact_asr_search(query, top_k=top_k, video_id_filter=video_id)
+
+@app.post("/api/v1/search/all")
+async def search_all_modes(req: SearchAllRequest):
+    """Search CLIP, OCR and ASR concurrently; the UI renders each branch separately."""
+    import asyncio
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="Query string cannot be empty")
+
+    async def run(mode: str):
+        started = time.perf_counter()
+        results = await asyncio.to_thread(
+            _search_one_mode, req.query, mode, req.top_k, req.video_id
+        )
+        return mode, {
+            "status": "complete",
+            "elapsed_ms": round((time.perf_counter() - started) * 1000),
+            "total_results": len(results),
+            "results": results,
+        }
+
+    branches = await asyncio.gather(*(run(mode) for mode in ("semantic", "ocr", "asr")))
+    return {"query": req.query, "results": dict(branches)}
 
 
 if __name__ == "__main__":
