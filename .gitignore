@@ -9,6 +9,8 @@ env/
 *.npy
 *.db
 *.json
+*.pkl
+models/
 
 # Except allow specific config json if any
 !package.json

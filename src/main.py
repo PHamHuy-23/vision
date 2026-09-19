@@ -1,8 +1,6 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-# os.environ['OMP_NUM_THREADS'] = '1'
-# os.environ['MKL_NUM_THREADS'] = '1'
-# os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['HF_HUB_OFFLINE'] = '1'
 
 import torch
 # torch.set_num_threads(1)
@@ -85,19 +83,30 @@ class SearchRequest(BaseModel):
 async def startup_event():
     print("[Startup] Video Retrieval & Supabase Backend online!", flush=True)
     import asyncio
-    print("[Startup] Loading OpenCLIP model to memory...", flush=True)
-    search_engine.load_clip_model()
-    print("[Startup] OpenCLIP model loaded!", flush=True)
-    print("[Startup] Pre-warming Flash model...", flush=True)
-    if "local-flash" not in session_pool:
-        session_flash = AgySession("local-flash", model="flash")
-        session_pool["local-flash"] = session_flash
-        await session_flash.start()
-    print("[Startup] Pre-warming Pro model...", flush=True)
-    if "local-pro" not in session_pool:
-        session_pro = AgySession("local-pro", model="pro")
-        session_pool["local-pro"] = session_pro
-        await session_pro.start()
+    
+    async def warm_ai_sessions():
+        try:
+            print("[Startup] Background pre-warming Flash model...", flush=True)
+            if "local-flash" not in session_pool:
+                session_flash = AgySession("local-flash", model="flash")
+                session_pool["local-flash"] = session_flash
+                await session_flash.start()
+                print("[Startup] Flash model ready!", flush=True)
+        except Exception as e:
+            print(f"[Startup] Flash pre-warm notice: {e}", flush=True)
+
+        try:
+            print("[Startup] Background pre-warming Pro model...", flush=True)
+            if "local-pro" not in session_pool:
+                session_pro = AgySession("local-pro", model="pro")
+                session_pool["local-pro"] = session_pro
+                await session_pro.start()
+                print("[Startup] Pro model ready!", flush=True)
+        except Exception as e:
+            print(f"[Startup] Pro pre-warm notice: {e}", flush=True)
+
+    asyncio.create_task(warm_ai_sessions())
+    print("[Startup] Server ready to accept HTTP traffic!", flush=True)
 
 
 @app.get("/")
@@ -297,24 +306,16 @@ def search_keyframes(req: SearchRequest):
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query string cannot be empty")
 
-    # Auto-translate Vietnamese to English for semantic search
+    # Fast Local/Cached Auto-translate Vietnamese to English for semantic search
     if req.mode in ["semantic", "smart", "hierarchical"]:
-        import re
-        if re.search(r'[áàãạảâấầẫậẩăắằẵặẳéèẽẹẻêếềễệểíìĩịỉóòõọỏôốồỗộổơớờỡợởúùũụủưứừữựửýỳỹỵỷđ]', req.query.lower()):
-            try:
-                from deep_translator import GoogleTranslator
-                translated = GoogleTranslator(source='vi', target='en').translate(req.query)
-                print(f"[Translator|Google] '{req.query}' -> '{translated}'", flush=True)
+        try:
+            from .fast_translator import fast_translator
+            translated = fast_translator.translate(req.query)
+            if translated != req.query:
+                print(f"[FastTranslator] '{req.query}' -> '{translated}'", flush=True)
                 req.query = translated
-            except Exception as e:
-                print(f"[Translator|Google] Failed: {e}. Trying fallback...", flush=True)
-                try:
-                    from deep_translator import MyMemoryTranslator
-                    translated = MyMemoryTranslator(source='vi-VN', target='en-US').translate(req.query)
-                    print(f"[Translator|MyMemory] '{req.query}' -> '{translated}'", flush=True)
-                    req.query = translated
-                except Exception as e2:
-                    print(f"[Translator|MyMemory] Failed: {e2}", flush=True)
+        except Exception as e:
+            print(f"[FastTranslator] Translation warning: {e}", flush=True)
 
     if "->" in req.query:
         queries = [q.strip() for q in req.query.split("->") if q.strip()]
@@ -360,5 +361,5 @@ def search_keyframes(req: SearchRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.main:app", host=HOST, port=PORT, reload=False)
+    uvicorn.run(app, host=HOST, port=PORT)
 

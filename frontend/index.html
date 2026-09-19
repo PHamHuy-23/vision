@@ -4,6 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Retrieval System v2.0</title>
+    <!-- Preconnect CDN resource hints for sub-second image loading -->
+    <link rel="preconnect" href="https://pub-63867f61a3cb4f34a8b442399021fbbd.r2.dev" crossorigin>
+    <link rel="dns-prefetch" href="https://pub-63867f61a3cb4f34a8b442399021fbbd.r2.dev">
+    <link rel="preconnect" href="https://lh3.googleusercontent.com" crossorigin>
+    <link rel="dns-prefetch" href="https://lh3.googleusercontent.com">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
@@ -179,8 +184,24 @@
             </div>
 
             <!-- Results Meta -->
-            <div class="mb-2 shrink-0 flex justify-between items-center">
+            <div class="mb-2 shrink-0 flex flex-wrap justify-between items-center gap-2">
                 <div id="resultsCount" class="text-gray-400 text-sm font-medium">Ready to search.</div>
+                <div id="benchmarkTelemetry" class="hidden text-xs font-mono flex items-center gap-2 bg-gray-900/90 border border-gray-700/80 px-3 py-1 rounded-full shadow-inner">
+                    <span id="badgeApiTime" class="text-blue-400 font-semibold flex items-center gap-1" title="Thời gian Backend xử lý (Search + DB)">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                        API: --ms
+                    </span>
+                    <span class="text-gray-600">|</span>
+                    <span id="badgeFirstImg" class="text-amber-400 font-semibold flex items-center gap-1" title="Thời gian từ lúc search đến khi ảnh đầu tiên hiện lên">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                        Ảnh 1: --ms
+                    </span>
+                    <span class="text-gray-600">|</span>
+                    <span id="badgeAllImgs" class="text-emerald-400 font-semibold flex items-center gap-1" title="Thời gian tải xong toàn bộ ảnh trong danh sách">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                        Toàn bộ: --ms
+                    </span>
+                </div>
             </div>
 
             <!-- Results Grid -->
@@ -737,7 +758,7 @@
             document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
         };
 
-        function renderResults(items) {
+        function renderResults(items, searchStartTime) {
             lastResults = items;
             if (!items || !items.length) {
                 resultsGrid.innerHTML = '<div class="col-span-full text-center py-10 text-gray-500 font-medium">No results found for this query.</div>';
@@ -745,104 +766,163 @@
             }
             const activeQ = appState.queries.find(x => x.id === appState.activeId);
             
-            resultsGrid.innerHTML = items.map((item, index) => {
-                const fileId = item.gdrive_file_id;
-                const path = item.image_path || "";
-                const fallbackUrl = item.r2_url || (fileId ? `${API_BASE}/api/v1/drive/proxy/${fileId}` : (path.startsWith('http') ? path : ''));
-                const thumbUrl = fallbackUrl;
-                const highResUrl = fallbackUrl;
+                resultsGrid.innerHTML = items.map((item, index) => {
+                    const fileId = item.gdrive_file_id;
+                    const path = item.image_path || "";
+                    const fallbackUrl = item.r2_url || (fileId ? `${API_BASE}/api/v1/drive/proxy/${fileId}` : (path.startsWith('http') ? path : ''));
+                    const thumbUrl = fallbackUrl;
+                    const highResUrl = fallbackUrl;
 
-                let isAdded = false;
-                if (activeQ) {
-                    const cleanVid = item.video_id.replace(/\.[^/.]+$/, "");
-                    const intFrame = Math.round(Number(item.frame_idx));
-                    if (activeQ.type === 'KIS' || activeQ.type === 'QA') {
-                        isAdded = !!activeQ.items.find(x => x.video_id === cleanVid && x.frame_idx === intFrame);
-                    } else if (activeQ.type === 'TRAKE') {
-                        isAdded = !!activeQ.items.find(x => x.video_id === cleanVid && x.frames.includes(intFrame));
+                    let isAdded = false;
+                    if (activeQ) {
+                        const cleanVid = item.video_id.replace(/\.[^/.]+$/, "");
+                        const intFrame = Math.round(Number(item.frame_idx));
+                        if (activeQ.type === 'KIS' || activeQ.type === 'QA') {
+                            isAdded = !!activeQ.items.find(x => x.video_id === cleanVid && x.frame_idx === intFrame);
+                        } else if (activeQ.type === 'TRAKE') {
+                            isAdded = !!activeQ.items.find(x => x.video_id === cleanVid && x.frames.includes(intFrame));
+                        }
                     }
+
+                    const displayScore = item.score !== undefined ? `${parseFloat(item.score).toFixed(1)}%` : '';
+
+                    return `
+                    <div class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden shadow-lg hover:border-blue-500 hover:shadow-blue-500/20 transition-all flex flex-col group">
+                        <div class="relative w-full pt-[56.25%] bg-gray-900 cursor-pointer" onclick="openPreview('${highResUrl}', '${item.video_id}', 'Frame: ${item.frame_idx} | Timestamp: ${item.timestamp} | Similarity: ${displayScore}', ${item.pts_time}, ${index}, '${item.object_file_id || ""}', '${item.ocr_json_id || ""}')">
+                            <img src="${thumbUrl}" class="absolute top-0 left-0 w-full h-full object-contain" loading="${index < 6 ? 'eager' : 'lazy'}" ${index < 6 ? 'fetchpriority="high"' : ''} onerror="this.onerror=null; if('${fallbackUrl}') this.src='${fallbackUrl}';">
+                            ${displayScore ? `<div class="absolute top-2 left-2 bg-black/80 text-white text-[11px] font-bold px-2 py-0.5 rounded backdrop-blur-sm border border-gray-700">${displayScore}</div>` : ''}
+                            <button class="absolute top-2 right-2 w-8 h-8 rounded flex items-center justify-center font-bold text-lg transition-all shadow-lg border ${isAdded ? 'bg-green-600 text-white border-green-500' : 'bg-black/50 text-white border-gray-500 hover:bg-blue-600 hover:border-blue-500 backdrop-blur-md'}" onclick="event.stopPropagation(); addToActive('${item.video_id}', ${item.frame_idx})" title="Add to Active Query">
+                                ${isAdded ? '✓' : '+'}
+                            </button>
+                        </div>
+
+                        <div class="p-3 flex flex-col gap-2">
+                            <div class="flex justify-between items-center text-sm">
+                                <span class="font-bold text-blue-300 truncate" title="${item.video_id}">${item.video_id}</span>
+                                <span class="text-gray-300 bg-gray-900 px-2 py-0.5 rounded text-xs border border-gray-700 font-mono">Fr:${item.frame_idx}</span>
+                            </div>
+                            <div class="text-[11px] text-gray-400 font-mono flex items-center gap-1">
+                                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                ${item.timestamp}
+                            </div>
+                            
+                            <div class="grid grid-cols-2 gap-2 mt-1 pt-2 border-t border-gray-700">
+                                <button class="bg-gray-700 hover:bg-blue-600 text-white text-xs py-1.5 rounded transition-colors flex items-center justify-center gap-1 font-medium" onclick="event.stopPropagation(); findSimilar(${item.vector_id})" title="Search for visually similar frames">
+                                    <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                                    Similar
+                                </button>
+                                <button class="bg-gray-700 hover:bg-purple-600 text-white text-xs py-1.5 rounded transition-colors flex items-center justify-center gap-1 font-medium" onclick="event.stopPropagation(); trackContext('${item.video_id}', ${item.frame_idx})" title="Load the next 30 frames of this video">
+                                    <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7"></path></svg>
+                                    Track
+                                </button>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('');
+
+                // Benchmark Telemetry: Track Image Loading Times from Search Initiation
+                if (searchStartTime) {
+                    const totalImgs = items.length;
+                    let loadedCount = 0;
+                    let firstImageReported = false;
+                    const badgeFirst = document.getElementById('badgeFirstImg');
+                    const badgeAll = document.getElementById('badgeAllImgs');
+                    
+                    if (badgeFirst) badgeFirst.innerHTML = `<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg> Ảnh 1: ...`;
+                    if (badgeAll) badgeAll.innerHTML = `<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg> Toàn bộ: 0/${totalImgs}`;
+
+                    const imgEls = resultsGrid.querySelectorAll('img');
+                    imgEls.forEach((img) => {
+                        const onImgDone = () => {
+                            loadedCount++;
+                            const now = performance.now();
+                            if (!firstImageReported) {
+                                firstImageReported = true;
+                                const firstMs = Math.round(now - searchStartTime);
+                                if (badgeFirst) badgeFirst.innerHTML = `<svg class="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg> Ảnh 1: ${firstMs}ms`;
+                            }
+                            if (loadedCount >= totalImgs) {
+                                const allMs = Math.round(now - searchStartTime);
+                                if (badgeAll) badgeAll.innerHTML = `<svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg> Toàn bộ: ${allMs}ms`;
+                            } else if (badgeAll) {
+                                badgeAll.title = `Đã tải ${loadedCount}/${totalImgs} ảnh`;
+                            }
+                        };
+                        if (img.complete && img.naturalWidth !== 0) {
+                            onImgDone();
+                        } else {
+                            img.addEventListener('load', onImgDone, { once: true });
+                            img.addEventListener('error', onImgDone, { once: true });
+                        }
+                    });
                 }
+            }
 
-                const displayScore = item.score !== undefined ? `${parseFloat(item.score).toFixed(1)}%` : '';
+            window.findSimilar = async function(vectorId) {
+                if (vectorId == null) return alert("Vector ID not found for this frame.");
+                const searchStartTime = performance.now();
+                const telemetryDiv = document.getElementById('benchmarkTelemetry');
+                if (telemetryDiv) telemetryDiv.classList.remove('hidden');
+                spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.innerHTML = 'Searching for <span class="text-blue-400">visually similar</span> images...';
+                try {
+                    const res = await fetch(`${API_BASE}/api/v1/search/similar`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ vector_id: vectorId, top_k: parseInt(topKSelect.value) || 50 })
+                    });
+                    const apiDuration = Math.round(performance.now() - searchStartTime);
+                    const badgeApi = document.getElementById('badgeApiTime');
+                    if (badgeApi) badgeApi.innerHTML = `<svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg> API: ${apiDuration}ms`;
+                    const data = await res.json();
+                    spinner.style.display = 'none';
+                    if (res.ok) { renderResults(data.results, searchStartTime); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.results.length}</span> visually similar frames.`; }
+                } catch(e) { spinner.style.display = 'none'; resultsCount.textContent = 'Server Connection Error.'; }
+            };
 
-                return `
-                <div class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden shadow-lg hover:border-blue-500 hover:shadow-blue-500/20 transition-all flex flex-col group">
-                    <div class="relative w-full pt-[56.25%] bg-gray-900 cursor-pointer" onclick="openPreview('${highResUrl}', '${item.video_id}', 'Frame: ${item.frame_idx} | Timestamp: ${item.timestamp} | Similarity: ${displayScore}', ${item.pts_time}, ${index}, '${item.object_file_id || ""}', '${item.ocr_json_id || ""}')">
-                        <img src="${thumbUrl}" class="absolute top-0 left-0 w-full h-full object-contain" loading="lazy" onerror="this.onerror=null; if('${fallbackUrl}') this.src='${fallbackUrl}';">
-                        ${displayScore ? `<div class="absolute top-2 left-2 bg-black/80 text-white text-[11px] font-bold px-2 py-0.5 rounded backdrop-blur-sm border border-gray-700">${displayScore}</div>` : ''}
-                        <button class="absolute top-2 right-2 w-8 h-8 rounded flex items-center justify-center font-bold text-lg transition-all shadow-lg border ${isAdded ? 'bg-green-600 text-white border-green-500' : 'bg-black/50 text-white border-gray-500 hover:bg-blue-600 hover:border-blue-500 backdrop-blur-md'}" onclick="event.stopPropagation(); addToActive('${item.video_id}', ${item.frame_idx})" title="Add to Active Query">
-                            ${isAdded ? '✓' : '+'}
-                        </button>
-                    </div>
+            window.trackContext = async function(videoId, frameIdx) {
+                const searchStartTime = performance.now();
+                const telemetryDiv = document.getElementById('benchmarkTelemetry');
+                if (telemetryDiv) telemetryDiv.classList.remove('hidden');
+                spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.innerHTML = `Tracking next frames in <span class="text-purple-400 font-bold">${videoId}</span>...`;
+                try {
+                    const res = await fetch(`${API_BASE}/api/v1/search/context?video_id=${videoId}&frame_idx=${frameIdx}&limit=30`);
+                    const apiDuration = Math.round(performance.now() - searchStartTime);
+                    const badgeApi = document.getElementById('badgeApiTime');
+                    if (badgeApi) badgeApi.innerHTML = `<svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg> API: ${apiDuration}ms`;
+                    const data = await res.json();
+                    spinner.style.display = 'none';
+                    if (res.ok) { renderResults(data.results, searchStartTime); resultsCount.innerHTML = `Loaded <span class="text-white font-bold">${data.results.length}</span> subsequent frames for ${videoId}.`; }
+                } catch(e) { spinner.style.display = 'none'; resultsCount.textContent = 'Server Connection Error.'; }
+            };
 
-                    <div class="p-3 flex flex-col gap-2">
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="font-bold text-blue-300 truncate" title="${item.video_id}">${item.video_id}</span>
-                            <span class="text-gray-300 bg-gray-900 px-2 py-0.5 rounded text-xs border border-gray-700 font-mono">Fr:${item.frame_idx}</span>
-                        </div>
-                        <div class="text-[11px] text-gray-400 font-mono flex items-center gap-1">
-                            <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                            ${item.timestamp}
-                        </div>
-                        
-                        <div class="grid grid-cols-2 gap-2 mt-1 pt-2 border-t border-gray-700">
-                            <button class="bg-gray-700 hover:bg-blue-600 text-white text-xs py-1.5 rounded transition-colors flex items-center justify-center gap-1 font-medium" onclick="event.stopPropagation(); findSimilar(${item.vector_id})" title="Search for visually similar frames">
-                                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-                                Similar
-                            </button>
-                            <button class="bg-gray-700 hover:bg-purple-600 text-white text-xs py-1.5 rounded transition-colors flex items-center justify-center gap-1 font-medium" onclick="event.stopPropagation(); trackContext('${item.video_id}', ${item.frame_idx})" title="Load the next 30 frames of this video">
-                                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7"></path></svg>
-                                Track
-                            </button>
-                        </div>
-                    </div>
-                </div>`;
-            }).join('');
-        }
-
-        window.findSimilar = async function(vectorId) {
-            if (vectorId == null) return alert("Vector ID not found for this frame.");
-            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.innerHTML = 'Searching for <span class="text-blue-400">visually similar</span> images...';
-            try {
-                const res = await fetch(`${API_BASE}/api/v1/search/similar`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ vector_id: vectorId, top_k: parseInt(topKSelect.value) || 50 })
-                });
-                const data = await res.json();
-                spinner.style.display = 'none';
-                if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.results.length}</span> visually similar frames.`; }
-            } catch(e) { spinner.style.display = 'none'; resultsCount.textContent = 'Server Connection Error.'; }
-        };
-
-        window.trackContext = async function(videoId, frameIdx) {
-            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.innerHTML = `Tracking next frames in <span class="text-purple-400 font-bold">${videoId}</span>...`;
-            try {
-                const res = await fetch(`${API_BASE}/api/v1/search/context?video_id=${videoId}&frame_idx=${frameIdx}&limit=30`);
-                const data = await res.json();
-                spinner.style.display = 'none';
-                if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Loaded <span class="text-white font-bold">${data.results.length}</span> subsequent frames for ${videoId}.`; }
-            } catch(e) { spinner.style.display = 'none'; resultsCount.textContent = 'Server Connection Error.'; }
-        };
-
-        searchForm.onsubmit = async (e) => {
-            e.preventDefault();
-            const query = queryInput.value.trim();
-            if (!query) return;
-            spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.textContent = 'Searching...';
-            try {
-                const res = await fetch(`${API_BASE}/api/v1/search`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        query, top_k: parseInt(topKSelect.value), video_id: videoIdInput.value.trim() || null,
-                        mode: document.getElementById('searchMode').value, enable_rerank: false
-                    })
-                });
-                const data = await res.json();
-                spinner.style.display = 'none';
-                if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.total_results || data.results.length}</span> results for "<span class="text-blue-400">${query}</span>"`; }
-                else { resultsCount.textContent = `Error: ${data.detail}`; }
-            } catch (err) { spinner.style.display = 'none'; resultsCount.textContent = 'API Connection Error'; }
-        };
+            searchForm.onsubmit = async (e) => {
+                e.preventDefault();
+                const query = queryInput.value.trim();
+                if (!query) return;
+                const searchStartTime = performance.now();
+                const telemetryDiv = document.getElementById('benchmarkTelemetry');
+                const badgeApi = document.getElementById('badgeApiTime');
+                if (telemetryDiv) telemetryDiv.classList.remove('hidden');
+                if (badgeApi) badgeApi.innerHTML = `<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg> API: đang tìm...`;
+                spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.textContent = 'Searching...';
+                try {
+                    const res = await fetch(`${API_BASE}/api/v1/search`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            query, top_k: parseInt(topKSelect.value), video_id: videoIdInput.value.trim() || null,
+                            mode: document.getElementById('searchMode').value, enable_rerank: false
+                        })
+                    });
+                    const apiDuration = Math.round(performance.now() - searchStartTime);
+                    if (badgeApi) badgeApi.innerHTML = `<svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg> API: ${apiDuration}ms`;
+                    const data = await res.json();
+                    spinner.style.display = 'none';
+                    if (res.ok) { 
+                        renderResults(data.results, searchStartTime); 
+                        resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.total_results || data.results.length}</span> results for "<span class="text-blue-400">${query}</span>"`; 
+                    }
+                    else { resultsCount.textContent = `Error: ${data.detail}`; }
+                } catch (err) { spinner.style.display = 'none'; resultsCount.textContent = 'API Connection Error'; }
+            };
 
         // Tabs Logic
         const tabs = ['tabTextSearch', 'tabImageSearch', 'tabVideoSearch', 'tabTimeConvert', 'tabContextSearch'];
@@ -916,15 +996,22 @@
             const vidFilter = document.getElementById('imageVideoIdInput').value.trim();
             if (vidFilter) formData.append('video_id', vidFilter);
             
+            const searchStartTime = performance.now();
+            const telemetryDiv = document.getElementById('benchmarkTelemetry');
+            const badgeApi = document.getElementById('badgeApiTime');
+            if (telemetryDiv) telemetryDiv.classList.remove('hidden');
+            if (badgeApi) badgeApi.innerHTML = `<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg> API: đang tìm...`;
             spinner.style.display = 'block'; resultsGrid.innerHTML = ''; resultsCount.textContent = 'Searching by Image...';
             try {
                 const res = await fetch(`${API_BASE}/api/v1/search/image`, {
                     method: 'POST',
                     body: formData
                 });
+                const apiDuration = Math.round(performance.now() - searchStartTime);
+                if (badgeApi) badgeApi.innerHTML = `<svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg> API: ${apiDuration}ms`;
                 const data = await res.json();
                 spinner.style.display = 'none';
-                if (res.ok) { renderResults(data.results); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.total_results || data.results.length}</span> similar images`; }
+                if (res.ok) { renderResults(data.results, searchStartTime); resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.total_results || data.results.length}</span> similar images`; }
                 else { resultsCount.textContent = `Error: ${data.detail}`; }
             } catch (err) { spinner.style.display = 'none'; resultsCount.textContent = 'API Connection Error'; }
         };
