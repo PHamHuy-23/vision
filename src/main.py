@@ -91,25 +91,21 @@ async def startup_event():
     import asyncio
     
     async def warm_ai_sessions():
-        try:
-            print("[Startup] Background pre-warming Flash model...", flush=True)
-            if "local-flash" not in session_pool:
-                session_flash = AgySession("local-flash", model="flash")
-                session_pool["local-flash"] = session_flash
-                await session_flash.start()
-                print("[Startup] Flash model ready!", flush=True)
-        except Exception as e:
-            print(f"[Startup] Flash pre-warm notice: {e}", flush=True)
+        async def warm_one(sid: str, model: str, label: str):
+            try:
+                print(f"[Startup] Background pre-warming {label} model...", flush=True)
+                if sid not in session_pool:
+                    session = AgySession(sid, model=model)
+                    session_pool[sid] = session
+                    await session.start(prewarm=True)
+                print(f"[Startup] {label} model ready!", flush=True)
+            except Exception as e:
+                print(f"[Startup] {label} pre-warm notice: {e}", flush=True)
 
-        try:
-            print("[Startup] Background pre-warming Pro model...", flush=True)
-            if "local-pro" not in session_pool:
-                session_pro = AgySession("local-pro", model="pro")
-                session_pool["local-pro"] = session_pro
-                await session_pro.start()
-                print("[Startup] Pro model ready!", flush=True)
-        except Exception as e:
-            print(f"[Startup] Pro pre-warm notice: {e}", flush=True)
+        await asyncio.gather(
+            warm_one("local-flash", "flash", "Flash"),
+            warm_one("local-pro", "pro", "Pro"),
+        )
 
     asyncio.create_task(warm_ai_sessions())
     print("[Startup] Server ready to accept HTTP traffic!", flush=True)
@@ -306,7 +302,6 @@ async def chat_endpoint(req: ChatRequest):
     if sid not in session_pool:
         session = AgySession(sid, model="pro" if is_complex else "flash")
         session_pool[sid] = session
-        await session.start()
     else:
         session = session_pool[sid]
 

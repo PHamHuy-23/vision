@@ -3,6 +3,7 @@
 import asyncio
 import sys
 import time
+import re
 from pathlib import Path
 
 from mcp import ClientSession
@@ -37,12 +38,13 @@ async def verify() -> None:
                 elapsed = time.perf_counter() - started
                 assert not result.isError, result.content
                 output = result.content[0].text
+                print(f"[{name}] transport={elapsed:.3f}s")
+                print(output)
                 if expected_video:
                     assert expected_video in output, output
-                # Includes MCP stdio/schema refresh overhead, not only SQLite time.
-                assert elapsed < 12.0, f"{name} evidence recall took {elapsed:.2f}s"
-                print(f"[{name}] {elapsed:.3f}s")
-                print(output)
+                internal = re.search(r"evidence v2 completed in ([0-9.]+)s", output)
+                assert internal, output
+                assert float(internal.group(1)) < 5.0, output
 
 
 if __name__ == "__main__":

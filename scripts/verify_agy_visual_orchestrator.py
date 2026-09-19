@@ -32,7 +32,7 @@ BENCHMARKS = {
 async def verify(query: str, expected_tokens: list[str] | None = None) -> None:
     session = AgySession("visual-orchestrator-smoke", model="pro")
     started = time.perf_counter()
-    await session.start()
+    await session.start(prewarm=True)
     ready = time.perf_counter()
     chunks = []
     try:

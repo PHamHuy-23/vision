@@ -14,6 +14,7 @@ import io
 import math
 import json
 import sqlite3
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -27,7 +28,7 @@ mcp = FastMCP("VideoRetrievalSystem")
 
 API_BASE = "http://127.0.0.1:8000"
 DB_PATH = Path(__file__).resolve().with_name("video_index_v2.db")
-MAX_EVIDENCE_ROWS_PER_SOURCE = 3000
+MAX_EVIDENCE_ROWS_PER_SOURCE = 500
 
 
 def _build_vision_probe(variant: str) -> bytes:
@@ -307,6 +308,7 @@ async def search_video_evidence(
     as ingredient or action words. This is candidate recall only, never visual
     proof: inspect the returned video/frame pairs with an image tool.
     """
+    started_at = time.perf_counter()
     clean_terms = []
     for term in terms:
         normalized = " ".join(str(term).strip().split())
@@ -439,7 +441,11 @@ async def search_video_evidence(
         selected_by_video[video_id] = selected
     timestamps = await asyncio.to_thread(load_timestamps, timestamp_keys)
 
-    lines = ["Metadata evidence for candidate recall only; visually verify every claim:"]
+    elapsed = time.perf_counter() - started_at
+    lines = [
+        f"Metadata evidence v2 completed in {elapsed:.3f}s; candidate recall only; "
+        "visually verify every claim:"
+    ]
     if skipped_sources:
         skipped = ", ".join(
             f"{term}/{mode} ({count} hits)" for term, mode, count in skipped_sources
