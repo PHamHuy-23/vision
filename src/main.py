@@ -12,7 +12,7 @@ import json
 import time
 import urllib.request
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 
 # Ensure UTF-8 console output for Windows compatibility
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from .agy_session import AgySession, session_pool
+from .agy_session import AgySession, is_complex_visual_query, session_pool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import asyncio
 from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
@@ -78,7 +78,7 @@ class SearchRequest(BaseModel):
     query: str = Field(..., description="Natural language search query in English")
     top_k: int = Field(20, ge=1, le=200, description="Number of top matching results to retrieve")
     video_id: Optional[str] = Field(None, description="Optional Video ID filter constraint")
-    mode: str = Field("semantic", description="Search mode: semantic, ocr, or asr")
+    mode: Literal["semantic", "ocr", "asr"] = Field("semantic", description="Search mode: semantic, ocr, or asr")
 
 class SearchAllRequest(BaseModel):
     query: str = Field(..., description="Natural language query")
@@ -298,8 +298,7 @@ async def search_by_image(file: UploadFile = File(...), top_k: int = Form(50), v
 @app.post("/api/v1/chat")
 async def chat_endpoint(req: ChatRequest):
     # Model Routing Logic
-    msg_lower = req.message.lower()
-    is_complex = any(kw in msg_lower for kw in ["sau đó", "trước khi", "tiếp theo", "rồi", "khi", "lúc"]) or len(req.message.split()) > 15
+    is_complex = is_complex_visual_query(req.message)
     
     # Force use pre-warmed routed session instead of frontend's static ID
     sid = "local-pro" if is_complex else "local-flash"
@@ -323,14 +322,13 @@ async def chat_endpoint(req: ChatRequest):
 @app.post("/api/v1/search")
 def search_keyframes(req: SearchRequest):
     import time
-    import re
     start_time = time.time()
     
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query string cannot be empty")
 
     # Fast Local/Cached Auto-translate Vietnamese to English for semantic search
-    if req.mode in ["semantic", "smart", "hierarchical"]:
+    if req.mode in ["semantic", "smart"]:
         try:
             from .fast_translator import fast_translator
             translated = fast_translator.translate(req.query)
@@ -340,27 +338,7 @@ def search_keyframes(req: SearchRequest):
         except Exception as e:
             print(f"[FastTranslator] Translation warning: {e}", flush=True)
 
-    temporal_requested = req.mode == "temporal" or "->" in req.query
-    if temporal_requested:
-        # Accept explicit arrows, one event per line, or ordinary multi-sentence prose.
-        queries = [q.strip(" \t\r\n.-") for q in re.split(r'\s*(?:->|\r?\n+|(?<=[.!?])\s+)\s*', req.query) if q.strip(" \t\r\n.-")]
-        if len(queries) == 1:
-            queries = [q.strip() for q in re.split(r'\b(?:sau đó|tiếp theo|rồi)\b', req.query, flags=re.IGNORECASE) if q.strip()]
-
-        # Reuse the existing translator independently per event so each semantic
-        # search receives a focused query rather than one long paragraph.
-        try:
-            from .fast_translator import fast_translator
-            queries = [fast_translator.translate(q) for q in queries]
-        except Exception as e:
-            print(f"[FastTranslator] Temporal translation warning: {e}", flush=True)
-
-        results = search_engine.temporal_search(
-            queries=queries,
-            top_k=req.top_k
-        )
-        print(f"[Search API] Temporal search took {time.time() - start_time:.3f}s", flush=True)
-    elif req.mode == "ocr":
+    if req.mode == "ocr":
         results = search_engine.exact_ocr_search(
             query_text=req.query,
             top_k=req.top_k,
@@ -374,12 +352,6 @@ def search_keyframes(req: SearchRequest):
             video_id_filter=req.video_id
         )
         print(f"[Search API] ASR search took {time.time() - start_time:.3f}s", flush=True)
-    elif req.mode == "hybrid":
-        results = search_engine.hybrid_search(
-            query_text=req.query,
-            top_k=req.top_k,
-            video_id_filter=req.video_id
-        )
     else:
         results = search_engine.search(
             query_text=req.query,

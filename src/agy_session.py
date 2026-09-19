@@ -2,15 +2,27 @@ import asyncio
 import json
 import sys
 import os
+import re
 
 AGY_PATH = r"C:\Users\ADMIN\AppData\Local\agy\bin\agy.exe"
 WORKING_DIR = r"G:\Desktop\vision"
+
+
+def is_complex_visual_query(message: str) -> bool:
+    """Route only genuine multi-event requests to the heavier agent."""
+    normalized = " ".join(message.lower().split())
+    sequence_markers = ("sau đó", "tiếp theo", "trước khi", "sau khi", " rồi ")
+    if any(marker in f" {normalized} " for marker in sequence_markers):
+        return True
+    sentences = [part.strip() for part in re.split(r"[.!?\n]+", message) if part.strip()]
+    return len(sentences) >= 2
 
 class AgySession:
     # Hard upper bound for one assistant turn.  The prompt budget alone is not
     # sufficient because a stalled tool/model process can otherwise hold the
     # HTTP stream open for minutes.
-    RESPONSE_TIMEOUT_SECONDS = 30.0
+    HEARTBEAT_SECONDS = 8.0
+    RESPONSE_TIMEOUT_SECONDS = 45.0
     """1 persistent agy process = 1 conversation thread"""
 
     def __init__(self, session_id: str, model: str = None):
@@ -58,7 +70,7 @@ class AgySession:
                 "Do not call any tool. Reply with READY only."
             ):
                 pass
-            if self.proc.returncode is not None:
+            if self.proc is None or self.proc.returncode is not None:
                 raise RuntimeError("Agy session exited during prewarm")
 
     async def send_message(self, message: str):
@@ -86,7 +98,7 @@ AVAILABLE TOOLS:
 
 STRICT EFFICIENCY & TIMING RULES (CRITICAL):
 1. SIMPLE VISUAL QUERY: Call `search_semantic_video` once with a short English visual description and top_k=12, then call `inspect_candidate_grid` once with those candidates. Rank only what is visibly supported.
-2. MULTI-EVENT QUERY: Internally split the request into 2-4 atomic visible events. In one planning step when possible, call `search_semantic_video` for the 2-3 most distinctive events using short English descriptions and top_k=5, plus exactly one `search_video_evidence` call with 3-6 short Vietnamese concepts. Evidence terms MUST be distinctive concrete nouns explicitly named by the user, covering every event (for a recipe: each named ingredient/object such as `trứng`, `nấm`, `măng`, `đậu hũ`, `súp`; never generic verbs such as `cắt`, `cho`, `đổ`). Combine at most 8 unique candidates from both visual and metadata recall, preserving candidates from every event and prioritizing videos matching several evidence terms. Copy only exact video_id/frame_idx pairs returned by tools: never invent, interpolate, or pad frame numbers. Then inspect them with exactly one `inspect_candidate_grid` call.
+2. MULTI-EVENT QUERY: Internally split the request into 2-4 atomic visible events. In one planning step when possible, call `search_semantic_video` for the 2-3 most distinctive events using short English descriptions and top_k=5, plus exactly one `search_video_evidence` call with 3-6 short Vietnamese concepts. Evidence terms MUST be distinctive concrete nouns or compact noun phrases explicitly named by the user, covering every event (for a recipe: `trứng`, `nấm`, `măng`, `đậu hũ`, `súp`). Avoid standalone generic words such as `người`, `mặt`, `nước`, `áo`, `cắt`, `cho`, `đổ`; prefer a stated compound such as `xe đạp`, `áo đỏ`, or `trâu trắng`. Combine at most 8 unique candidates from both visual and metadata recall, preserving candidates from every event and prioritizing videos matching several evidence terms. Copy only exact video_id/frame_idx pairs returned by tools: never invent, interpolate, or pad frame numbers. Then inspect them with exactly one `inspect_candidate_grid` call.
 3. SEQUENCE VERIFICATION: For a multi-event query, group visible evidence by video_id. A video qualifies only when its frames collectively show the requested events. Call `inspect_video_sequence` at most once with limit=20 for the strongest video when chronological confirmation is needed. Never claim that separate video_ids form one matching sequence.
 4. OCR/ASR: `search_video_evidence` may use OCR/ASR only to improve candidate recall for multi-event queries. Never cite its terms as proof of a visual action. Do not call the raw OCR/ASR tools unless the user explicitly asks for visible text or spoken dialogue.
 5. HARD BUDGET: At most 4 search calls (including evidence recall), 1 candidate-grid call, and 1 sequence-grid call. No retries, recursive searching, subagents, source-code reads, or terminal tools. If MCP offloads a generated grid to a file URI, you may use `view_file` only on that exact returned media URI so you can see it; never open any other path. If evidence is weak, stop and report a partial/no-confident match instead of looping.
@@ -114,15 +126,22 @@ STRICT EFFICIENCY & TIMING RULES (CRITICAL):
                 yield chunk
 
     async def _read_until_result(self):
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
         while True:
-            try:
-                line = await asyncio.wait_for(
-                    self.proc.stdout.readline(), timeout=self.RESPONSE_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError:
-                yield 'data: [ERROR] Lỗi: AI không phản hồi trong 30 giây. Vui lòng thử lại.<br>\n\n'
+            remaining = self.RESPONSE_TIMEOUT_SECONDS - (loop.time() - started_at)
+            if remaining <= 0:
+                yield 'data: [ERROR] Lỗi: AI vượt quá giới hạn xử lý 45 giây. Vui lòng thử lại.<br>\n\n'
                 await self.close()
                 break
+            try:
+                line = await asyncio.wait_for(
+                    self.proc.stdout.readline(),
+                    timeout=min(self.HEARTBEAT_SECONDS, remaining),
+                )
+            except asyncio.TimeoutError:
+                yield 'data: [TOOL] ⏳ Vẫn đang xử lý...\n\n'
+                continue
 
             if not line:
                 break
@@ -175,11 +194,14 @@ STRICT EFFICIENCY & TIMING RULES (CRITICAL):
         yield 'data: [DONE]\n\n'
 
     async def close(self):
-        if self.proc and self.proc.returncode is None:
-            self.proc.stdin.close()
+        proc = self.proc
+        if proc and proc.returncode is None:
+            proc.stdin.close()
             try:
-                await asyncio.wait_for(self.proc.wait(), timeout=5.0)
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
             except asyncio.TimeoutError:
-                self.proc.terminate()
+                proc.terminate()
+        self.proc = None
+        session_pool.pop(self.session_id, None)
 
 session_pool = {}

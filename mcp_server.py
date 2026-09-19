@@ -27,6 +27,7 @@ mcp = FastMCP("VideoRetrievalSystem")
 
 API_BASE = "http://127.0.0.1:8000"
 DB_PATH = Path(__file__).resolve().with_name("video_index_v2.db")
+MAX_EVIDENCE_ROWS_PER_SOURCE = 3000
 
 
 def _build_vision_probe(variant: str) -> bytes:
@@ -317,87 +318,138 @@ async def search_video_evidence(
     frames_per_video = max(1, min(int(frames_per_video), 5))
 
     def search_all_terms():
-        batches = []
+        term_matches: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        skipped_sources = []
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
+            total_videos = int(
+                conn.execute("SELECT COUNT(DISTINCT video_id) FROM keyframes").fetchone()[0]
+            )
             for term in clean_terms:
                 match_expr = f'"{term.replace(chr(34), chr(34) * 2)}"'
+                videos: Dict[str, Dict[str, Any]] = {}
                 for mode, table in (("asr", "asr_fts"), ("ocr", "ocr_fts")):
+                    source_hits = int(
+                        conn.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?",
+                            (match_expr,),
+                        ).fetchone()[0]
+                    )
+                    if source_hits > MAX_EVIDENCE_ROWS_PER_SOURCE:
+                        skipped_sources.append((term, mode, source_hits))
+                        continue
                     rows = conn.execute(
                         f"""
-                        SELECT k.video_id, k.frame_idx, k.raw_json
+                        SELECT k.video_id, MIN(k.frame_idx) AS frame_idx,
+                               COUNT(*) AS hit_count
                         FROM {table}
                         JOIN keyframes AS k ON k.vector_id = {table}.vector_id
                         WHERE {table} MATCH ?
+                        GROUP BY k.video_id
                         """,
                         (match_expr,),
                     ).fetchall()
-                    results = []
                     for row in rows:
-                        raw = json.loads(row["raw_json"])
-                        timestamp = raw.get("timestamp", {})
-                        pts = float(timestamp.get("pts_time", 0.0))
-                        results.append(
-                            {
-                                "video_id": row["video_id"],
-                                "frame_idx": row["frame_idx"],
-                                "timestamp": f"{int(pts // 60):02d}:{int(pts % 60):02d} ({pts:.1f}s)",
+                        video_id = str(row["video_id"])
+                        hit_count = int(row["hit_count"])
+                        current = videos.get(video_id)
+                        if current is None:
+                            videos[video_id] = {
+                                "mode": mode,
+                                "frame_idx": int(row["frame_idx"]),
+                                "hit_count": hit_count,
+                                "best_source_hits": hit_count,
                             }
-                        )
-                    batches.append((term, mode, results))
-        return batches
+                        else:
+                            current["hit_count"] += hit_count
+                            if hit_count > current["best_source_hits"]:
+                                current["mode"] = mode
+                                current["frame_idx"] = int(row["frame_idx"])
+                                current["best_source_hits"] = hit_count
+                term_matches[term] = videos
+        return total_videos, term_matches, skipped_sources
 
-    batches = await asyncio.to_thread(search_all_terms)
+    total_videos, term_matches, skipped_sources = await asyncio.to_thread(search_all_terms)
 
     matched_terms: Dict[str, set[str]] = defaultdict(set)
     frame_evidence: Dict[str, Dict[tuple[str, int], Dict[str, Any]]] = defaultdict(dict)
     hit_counts: Dict[str, int] = defaultdict(int)
-    for term, mode, results in batches:
-        seen_video_for_term = set()
-        for result in results:
-            video_id = str(result.get("video_id", ""))
-            frame_idx = int(result.get("frame_idx", 0))
-            if not video_id:
-                continue
+    rarity_scores: Dict[str, float] = defaultdict(float)
+    for term, videos in term_matches.items():
+        # Terms occurring in few videos contribute much more than generic words.
+        idf = math.log((total_videos + 1) / (len(videos) + 1)) + 1.0
+        for video_id, result in videos.items():
+            frame_idx = result["frame_idx"]
             matched_terms[video_id].add(term)
-            if video_id not in seen_video_for_term:
-                hit_counts[video_id] += 1
-                seen_video_for_term.add(video_id)
+            rarity_scores[video_id] += idf
+            hit_counts[video_id] += result["hit_count"]
             key = (term, frame_idx)
             frame_evidence[video_id].setdefault(
                 key,
                 {
                     "term": term,
-                    "mode": mode,
+                    "mode": result["mode"],
                     "frame_idx": frame_idx,
-                    "timestamp": result.get("timestamp", ""),
+                    "timestamp": "",
                 },
             )
 
     ranked = sorted(
         matched_terms,
         key=lambda video_id: (
+            rarity_scores[video_id],
             len(matched_terms[video_id]),
-            hit_counts[video_id],
+            math.log1p(hit_counts[video_id]),
         ),
         reverse=True,
     )[:top_videos]
     if not ranked:
         return "No OCR/ASR evidence candidates found."
 
-    lines = ["Metadata evidence for candidate recall only; visually verify every claim:"]
-    for rank, video_id in enumerate(ranked, 1):
-        evidence = list(frame_evidence[video_id].values())
+    def load_timestamps(items: List[tuple[str, int]]) -> Dict[tuple[str, int], str]:
+        timestamps = {}
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            for video_id, frame_idx in items:
+                row = conn.execute(
+                    "SELECT raw_json FROM keyframes WHERE video_id = ? AND frame_idx = ? LIMIT 1",
+                    (video_id, frame_idx),
+                ).fetchone()
+                if not row:
+                    continue
+                raw = json.loads(row["raw_json"])
+                pts = float(raw.get("timestamp", {}).get("pts_time", 0.0))
+                timestamps[(video_id, frame_idx)] = (
+                    f"{int(pts // 60):02d}:{int(pts % 60):02d} ({pts:.1f}s)"
+                )
+        return timestamps
+
+    selected_by_video = {}
+    timestamp_keys = []
+    for video_id in ranked:
         selected = []
         used_terms = set()
-        for item in evidence:
+        for item in frame_evidence[video_id].values():
             if item["term"] not in used_terms:
                 selected.append(item)
                 used_terms.add(item["term"])
+                timestamp_keys.append((video_id, item["frame_idx"]))
             if len(selected) >= frames_per_video:
                 break
+        selected_by_video[video_id] = selected
+    timestamps = await asyncio.to_thread(load_timestamps, timestamp_keys)
+
+    lines = ["Metadata evidence for candidate recall only; visually verify every claim:"]
+    if skipped_sources:
+        skipped = ", ".join(
+            f"{term}/{mode} ({count} hits)" for term, mode, count in skipped_sources
+        )
+        lines.append(f"Ignored overly broad evidence sources: {skipped}.")
+    for rank, video_id in enumerate(ranked, 1):
+        selected = selected_by_video[video_id]
         frames = "; ".join(
-            f"{item['term']}=>{video_id}, {item['frame_idx']} ({item['timestamp']})"
+            f"{item['term']}=>{video_id}, {item['frame_idx']} "
+            f"({timestamps.get((video_id, item['frame_idx']), '')})"
             for item in selected
         )
         lines.append(
