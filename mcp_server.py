@@ -186,7 +186,7 @@ async def inspect_candidate_grid(
 
 @mcp.tool()
 async def inspect_video_sequence(
-    video_id: str, center_frame: int, limit: int = 12, columns: int = 4
+    video_id: str, center_frame: int, limit: int = 20, columns: int = 4
 ) -> Image:
     """
     Visually inspect a chronological sequence around one candidate frame.

@@ -62,7 +62,7 @@ async def verify() -> None:
                 {
                     "video_id": candidates[0]["video_id"],
                     "center_frame": candidates[0]["frame_idx"],
-                    "limit": 12,
+                    "limit": 20,
                     "columns": 4,
                 },
             )
@@ -71,7 +71,7 @@ async def verify() -> None:
             assert sequence_content.type == "image"
             sequence_decoded = base64.b64decode(sequence_content.data)
             with Image.open(io.BytesIO(sequence_decoded)) as sequence_sheet:
-                assert sequence_sheet.size == (1280, 666)
+                assert sequence_sheet.size == (1280, 1110)
                 print(
                     f"sequence_size={sequence_sheet.size}, "
                     f"jpeg_bytes={len(sequence_decoded)}"
