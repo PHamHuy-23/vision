@@ -29,8 +29,6 @@ from pydantic import BaseModel, Field
 from .agy_session import AgySession, is_complex_visual_query, session_pool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import asyncio
-from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
-
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = "local-user"
@@ -45,7 +43,6 @@ ssl_context.verify_mode = ssl.CERT_NONE
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-GDRIVE_API_KEY = os.getenv("GDRIVE_API_KEY", "AIzaSyCs_2-bm7Duz_tctK9cvtUhTJm7vtIbmEE")
 
 app = FastAPI(
     title="Video Retrieval & Supabase Google Drive API Backend",

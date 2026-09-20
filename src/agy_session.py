@@ -3,9 +3,16 @@ import json
 import sys
 import os
 import re
+from pathlib import Path
 
-AGY_PATH = r"C:\Users\ADMIN\AppData\Local\agy\bin\agy.exe"
-WORKING_DIR = r"G:\Desktop\vision"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+AGY_PATH = os.getenv("AGY_PATH", "agy")
+WORKING_DIR = str(PROJECT_ROOT)
 
 
 def is_complex_visual_query(message: str) -> bool:

@@ -4,6 +4,7 @@ __pycache__/
 venv/
 env/
 .env
+!.env.example
 
 # Large Data Files (DO NOT COMMIT TO GITHUB - OVER 100MB LIMIT)
 *.npy
@@ -11,6 +12,33 @@ env/
 *.json
 *.pkl
 models/
+
+# Local runtime/generated artifacts
+ai_search_benchmark.json
+benchmark_results.json
+candidate_dishes.json
+candidate_results.json
+inspect_66.json
+ranked_intersections.json
+startup_time.json
+top22_summary.json
+
+# Local development notes, benchmarks and one-off tooling
+scripts/
+agy-web-integration-research.md
+benchmark_report.md
+project_upgrade_plan.md
+HungryForSuccess_TechnicalReport.docx
+HungryForSuccess_TechnicalReport.md
+
+# Legacy data-building utilities (not required by the runtime application)
+src/db.py
+src/gemini_agent.py
+src/gdrive_indexer.py
+src/gdrive_mapper.py
+src/indexer.py
+src/upload_supabase.py
+v164_asr.txt
 
 # Except allow specific config json if any
 !package.json
