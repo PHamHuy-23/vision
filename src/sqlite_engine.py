@@ -16,7 +16,7 @@ try:
 except ImportError:
     HAS_FAISS = False
 
-from .config import DATA_ROOT, CONSOLIDATED_VECTORS_PATH, CLIP_MODEL_NAME, CLIP_PRETRAINED
+from .config import DATA_ROOT, DB_PATH, CONSOLIDATED_VECTORS_PATH, CLIP_MODEL_NAME, CLIP_PRETRAINED
 
 class SQLiteSearchEngine:
     def __init__(self, data_root: Path = DATA_ROOT, vectors_path: Path = CONSOLIDATED_VECTORS_PATH):
@@ -27,7 +27,7 @@ class SQLiteSearchEngine:
 
         self.data_root = Path(data_root).resolve()
         self.vectors_path = Path(vectors_path).resolve()
-        self.db_path = str(self.data_root.parent / "video_index_v2.db")
+        self.db_path = str(DB_PATH)
         
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = None
@@ -36,6 +36,7 @@ class SQLiteSearchEngine:
         self.vectors = None
         self.faiss_index = None
         self.metadata_cache = None
+        self.text_indexes_warmed = False
         
         self._load_vectors()
         self._load_metadata_cache()
@@ -67,9 +68,52 @@ class SQLiteSearchEngine:
         return None
         
     def _get_db(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA mmap_size=536870912")
+        conn.execute("PRAGMA cache_size=-65536")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA query_only=ON")
         return conn
+
+    def warm_text_indexes(self) -> Dict[str, Any]:
+        """Read the complete OCR/ASR FTS vocabularies into the OS page cache."""
+        import time
+
+        started = time.perf_counter()
+        metrics: Dict[str, Any] = {}
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        try:
+            conn.execute("PRAGMA mmap_size=536870912")
+            conn.execute("PRAGMA cache_size=-65536")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute(
+                "CREATE VIRTUAL TABLE temp.ocr_vocab_warm "
+                "USING fts5vocab('main', 'ocr_fts', 'row')"
+            )
+            conn.execute(
+                "CREATE VIRTUAL TABLE temp.asr_vocab_warm "
+                "USING fts5vocab('main', 'asr_fts', 'row')"
+            )
+            conn.execute("PRAGMA query_only=ON")
+            for mode in ("ocr", "asr"):
+                mode_started = time.perf_counter()
+                term_count, document_refs, token_count = conn.execute(
+                    f"SELECT count(*), coalesce(sum(doc), 0), coalesce(sum(cnt), 0) "
+                    f"FROM {mode}_vocab_warm"
+                ).fetchone()
+                metrics[mode] = {
+                    "terms": term_count,
+                    "document_refs": document_refs,
+                    "tokens": token_count,
+                    "elapsed_ms": round((time.perf_counter() - mode_started) * 1000, 1),
+                }
+        finally:
+            conn.close()
+
+        self.text_indexes_warmed = True
+        metrics["total_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        return metrics
 
     def _load_vectors(self):
         if self.vectors_path.exists():
@@ -398,7 +442,23 @@ class SQLiteSearchEngine:
                 break
         return results
 
-    def _fts_text_search(self, query_text: str, table_name: str, top_k: int = 20, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _fts_text_search(
+        self,
+        query_text: str,
+        table_name: str,
+        top_k: int = 20,
+        video_id_filter: Optional[str] = None,
+        telemetry: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        import time
+        metrics = telemetry if telemetry is not None else {}
+        metrics.update({
+            "engine": "fts5",
+            "fallback_used": False,
+            "metadata_cache_loaded": self.metadata_cache is not None,
+            "metadata_cache_hits": 0,
+            "metadata_db_fallbacks": 0,
+        })
         clean_q = query_text.strip().replace('"', '""')
         if not clean_q:
             return []
@@ -406,23 +466,34 @@ class SQLiteSearchEngine:
         match_expr = f'"{clean_q}"'
         results = []
         
-        with self._get_db() as conn:
+        connect_started = time.perf_counter()
+        conn = self._get_db()
+        metrics["db_connect_ms"] = round((time.perf_counter() - connect_started) * 1000, 3)
+        with conn:
             cur = conn.cursor()
             try:
                 query = f"SELECT vector_id FROM {table_name} WHERE {table_name} MATCH ? LIMIT ?"
+                execute_started = time.perf_counter()
                 cur.execute(query, (match_expr, top_k * 5 if video_id_filter else top_k))
+                metrics["fts_execute_ms"] = round((time.perf_counter() - execute_started) * 1000, 3)
+                fetch_started = time.perf_counter()
                 rows = cur.fetchall()
+                metrics["fts_fetch_ms"] = round((time.perf_counter() - fetch_started) * 1000, 3)
+                metrics["fts_rows"] = len(rows)
                 
+                hydrate_started = time.perf_counter()
                 for row in rows:
                     v_id = row['vector_id']
                     meta = self._get_metadata_item(v_id)
                     if meta:
+                        metrics["metadata_cache_hits"] += 1
                         item = meta.copy()
                         if video_id_filter and item.get("video_id") != video_id_filter:
                             continue
                         item["score"] = 100.0
                         results.append(item)
                     else:
+                        metrics["metadata_db_fallbacks"] += 1
                         cur2 = conn.cursor()
                         cur2.execute("SELECT raw_json FROM keyframes WHERE vector_id = ?", (v_id,))
                         r = cur2.fetchone()
@@ -430,17 +501,25 @@ class SQLiteSearchEngine:
                             results.append(self._format_result(r['raw_json'], 1.0))
                     if len(results) >= top_k:
                         break
+                metrics["metadata_ms"] = round((time.perf_counter() - hydrate_started) * 1000, 3)
+                metrics["result_count"] = len(results)
                 return results
             except Exception as e:
                 print(f"[FTS5] Notice: {e}, falling back to fuzzy scan", flush=True)
+                metrics["fallback_used"] = True
+                metrics["fallback_reason"] = f"{type(e).__name__}: {e}"
                 field_name = "ocr_text" if "ocr" in table_name else "asr_text"
-                return self._fuzzy_text_search(query_text, field_name, top_k, video_id_filter)
+                fallback_started = time.perf_counter()
+                fallback_results = self._fuzzy_text_search(query_text, field_name, top_k, video_id_filter)
+                metrics["fallback_ms"] = round((time.perf_counter() - fallback_started) * 1000, 3)
+                metrics["result_count"] = len(fallback_results)
+                return fallback_results
 
-    def exact_asr_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-        return self._fts_text_search(query_text, "asr_fts", top_k, video_id_filter)
+    def exact_asr_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None, telemetry: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        return self._fts_text_search(query_text, "asr_fts", top_k, video_id_filter, telemetry)
 
-    def exact_ocr_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-        return self._fts_text_search(query_text, "ocr_fts", top_k, video_id_filter)
+    def exact_ocr_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None, telemetry: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        return self._fts_text_search(query_text, "ocr_fts", top_k, video_id_filter, telemetry)
         
     def smart_search(self, query_text: str, top_k: int = 20, video_id_filter: Optional[str] = None, enable_rerank: bool = False) -> List[Dict[str, Any]]:
         return self.search(query_text=query_text, top_k=top_k, video_id_filter=video_id_filter)

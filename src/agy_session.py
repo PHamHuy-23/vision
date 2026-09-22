@@ -45,10 +45,21 @@ class AgySession:
         self.prewarm_done.set()
         self.is_first_message = True
 
+    def _process_is_usable(self) -> bool:
+        return bool(
+            self.proc
+            and self.proc.returncode is None
+            and self.proc.stdin
+            and not self.proc.stdin.is_closing()
+            and self.proc.stdout
+        )
+
     async def start(self, prewarm: bool = False):
         async with self.start_lock:
-            if self.ready.is_set() and self.proc and self.proc.returncode is None:
+            if self.ready.is_set() and self._process_is_usable():
                 return
+            if self.proc is not None:
+                await self.close(remove_from_pool=False)
             await self._start_process()
 
         if prewarm:
@@ -78,7 +89,9 @@ class AgySession:
         if self.model == "flash":
             cmd.extend(["--model", "gemini-3.8-flash-low", "--effort", "low"])
         elif self.model == "pro":
-            cmd.extend(["--model", "gemini-3.8-flash-medium", "--effort", "medium"])
+            # Backward-compatible alias: legacy callers must still use the
+            # lowest-token configuration selected for this application.
+            cmd.extend(["--model", "gemini-3.8-flash-low", "--effort", "low"])
         elif self.model:
             cmd.extend(["--model", self.model])
 
@@ -96,15 +109,21 @@ class AgySession:
         )
         # Drain init event (process ready signal)
         try:
-            await asyncio.wait_for(self.proc.stdout.readline(), timeout=15.0)
+            init_line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=15.0)
+            if not init_line:
+                await self.close(remove_from_pool=False)
+                raise RuntimeError("Agy exited before emitting its ready event")
         except asyncio.TimeoutError:
-            pass
+            if not self._process_is_usable():
+                await self.close(remove_from_pool=False)
+                raise RuntimeError("Agy exited while waiting for its ready event")
         self.ready.set()
 
     async def send_message(
         self, message: str, timeout_seconds: float = None, _internal: bool = False
     ):
-        if not self.ready.is_set():
+        if not self.ready.is_set() or not self._process_is_usable():
+            self.ready.clear()
             yield "data: [TOOL] ⚡ Khởi động phiên tìm kiếm...\n\n"
             await self.start(prewarm=False)
         while self.prewarming and not _internal:
@@ -116,6 +135,12 @@ class AgySession:
                 yield "data: [TOOL] ⚡ Đang làm nóng mô hình...\n\n"
             
         async with self.lock:
+            # The process may have died while this request waited for the
+            # previous turn to release the session lock.
+            if not self._process_is_usable():
+                self.ready.clear()
+                yield "data: [TOOL] ⚡ Khởi động lại phiên tìm kiếm...\n\n"
+                await self.start(prewarm=False)
             model_name = self.model if self.model else "inherit"
             yield f"data: [TOOL] Model Router: {model_name.upper()}\n\n"
             if self.is_first_message:
@@ -186,6 +211,8 @@ STRICT EFFICIENCY & TIMING RULES (CRITICAL):
                 continue
 
             if not line:
+                yield 'data: [ERROR] Phiên AI đã dừng đột ngột; hệ thống sẽ khởi động lại ở yêu cầu tiếp theo.\n\n'
+                await self.close()
                 break
 
             try:
@@ -235,16 +262,23 @@ STRICT EFFICIENCY & TIMING RULES (CRITICAL):
                 pass
         yield 'data: [DONE]\n\n'
 
-    async def close(self):
+    async def close(self, remove_from_pool: bool = True):
         proc = self.proc
         if proc and proc.returncode is None:
-            proc.stdin.close()
+            if proc.stdin and not proc.stdin.is_closing():
+                proc.stdin.close()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
         self.proc = None
         self.ready.clear()
-        session_pool.pop(self.session_id, None)
+        self.is_first_message = True
+        if remove_from_pool:
+            session_pool.pop(self.session_id, None)
 
 session_pool = {}

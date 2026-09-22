@@ -205,9 +205,9 @@
                         Ảnh 1: --ms
                     </span>
                     <span class="text-gray-600">|</span>
-                    <span id="badgeAllImgs" class="text-emerald-400 font-semibold flex items-center gap-1" title="Thời gian tải xong toàn bộ ảnh trong danh sách">
+                    <span id="badgeAllImgs" class="text-emerald-400 font-semibold flex items-center gap-1" title="Thời gian tải xong tối đa 6 ảnh ưu tiên đầu tiên">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
-                        Toàn bộ: --ms
+                        6 ảnh đầu: --ms
                     </span>
                 </div>
             </div>
@@ -942,16 +942,18 @@
 
                 // Benchmark Telemetry: Track Image Loading Times from Search Initiation
                 if (searchStartTime) {
-                    const totalImgs = items.length;
+                    // Only the first six images are eager. Measuring every image would
+                    // never finish until the user scrolls lazy-loaded cards into view.
+                    const totalImgs = Math.min(items.length, 6);
                     let loadedCount = 0;
                     let firstImageReported = false;
                     const badgeFirst = document.getElementById('badgeFirstImg');
                     const badgeAll = document.getElementById('badgeAllImgs');
                     
                     if (badgeFirst) badgeFirst.innerHTML = `<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg> Ảnh 1: ...`;
-                    if (badgeAll) badgeAll.innerHTML = `<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg> Toàn bộ: 0/${totalImgs}`;
+                    if (badgeAll) badgeAll.innerHTML = `<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg> 6 ảnh đầu: 0/${totalImgs}`;
 
-                    const imgEls = targetGrid.querySelectorAll('img');
+                    const imgEls = Array.from(targetGrid.querySelectorAll('img')).slice(0, totalImgs);
                     imgEls.forEach((img) => {
                         const onImgDone = () => {
                             loadedCount++;
@@ -963,7 +965,7 @@
                             }
                             if (loadedCount >= totalImgs) {
                                 const allMs = Math.round(now - searchStartTime);
-                                if (badgeAll) badgeAll.innerHTML = `<svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg> Toàn bộ: ${allMs}ms`;
+                                if (badgeAll) badgeAll.innerHTML = `<svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg> 6 ảnh đầu: ${allMs}ms`;
                             } else if (badgeAll) {
                                 badgeAll.title = `Đã tải ${loadedCount}/${totalImgs} ảnh`;
                             }
@@ -1036,10 +1038,24 @@
                     });
                     const apiDuration = Math.round(performance.now() - searchStartTime);
                     if (badgeApi) badgeApi.innerHTML = `<svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg> API: ${apiDuration}ms`;
+                    const parseStartedAt = performance.now();
                     const data = await res.json();
+                    const bodyParseMs = Math.round(performance.now() - parseStartedAt);
                     spinner.style.display = 'none';
                     if (res.ok) {
+                        const renderStartedAt = performance.now();
                         renderResults(data.results, searchStartTime, resultsGrid);
+                        const domRenderMs = Math.round(performance.now() - renderStartedAt);
+                        const clientTelemetry = {
+                            request_id: res.headers.get('X-Request-ID'),
+                            headers_ms: apiDuration,
+                            body_parse_ms: bodyParseMs,
+                            dom_render_ms: domRenderMs,
+                            server_timing: res.headers.get('Server-Timing'),
+                            backend: data.telemetry || null
+                        };
+                        console.info('[SearchTelemetry]', clientTelemetry);
+                        if (badgeApi) badgeApi.title = JSON.stringify(clientTelemetry, null, 2);
                         resultsCount.innerHTML = `Found <span class="text-white font-bold">${data.total_results || data.results.length}</span> results for "<span class="text-blue-400">${query}</span>"`;
                     }
                     else { resultsCount.textContent = `Error: ${data.detail}`; }

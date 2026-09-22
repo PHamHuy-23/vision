@@ -11,6 +11,7 @@ import ssl
 import json
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Literal
 
@@ -23,11 +24,10 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 
 from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from .agy_session import AgySession, is_complex_visual_query, session_pool
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from .agy_session import AgySession, session_pool
 import asyncio
 class ChatRequest(BaseModel):
     message: str
@@ -61,6 +61,11 @@ app.add_middleware(
 data_root_path = Path(DATA_ROOT).resolve()
 search_engine = VectorSearchEngine(data_root=data_root_path)
 supabase_svc = SupabaseService(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY)
+startup_status = {
+    "ready": False,
+    "text_indexes_warmed": False,
+    "agy_flash_ready": False,
+}
 
 frontend_dir = BASE_DIR / "frontend"
 if frontend_dir.exists():
@@ -77,35 +82,52 @@ class SearchRequest(BaseModel):
     video_id: Optional[str] = Field(None, description="Optional Video ID filter constraint")
     mode: Literal["semantic", "ocr", "asr"] = Field("semantic", description="Search mode: semantic, ocr, or asr")
 
-class SearchAllRequest(BaseModel):
-    query: str = Field(..., description="Natural language query")
-    top_k: int = Field(20, ge=1, le=200)
-    video_id: Optional[str] = None
-
 @app.on_event("startup")
 async def startup_event():
-    print("[Startup] Video Retrieval & Supabase Backend online!", flush=True)
-    import asyncio
-    
+    print("[Startup] Initializing Video Retrieval backend...", flush=True)
+    print("[Startup] Warming complete OCR/ASR FTS indexes...", flush=True)
+    try:
+        if not DB_PATH.is_file():
+            raise FileNotFoundError(f"Database not found: {DB_PATH}")
+        text_metrics = await asyncio.to_thread(search_engine.warm_text_indexes)
+        startup_status["text_indexes_warmed"] = True
+        print(
+            f"[Startup] OCR/ASR indexes ready in {text_metrics['total_ms'] / 1000:.2f}s "
+            f"(OCR {text_metrics['ocr']['terms']:,} terms, "
+            f"ASR {text_metrics['asr']['terms']:,} terms)",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[Startup] OCR/ASR index warm-up unavailable: {exc}", flush=True)
+
     async def warm_ai_sessions():
         async def warm_one(sid: str, model: str, label: str):
             try:
-                print(f"[Startup] Background pre-warming {label} model...", flush=True)
-                if sid not in session_pool:
+                print(f"[Startup] Pre-warming {label} model...", flush=True)
+                session = session_pool.get(sid)
+                if session is None:
                     session = AgySession(sid, model=model)
                     session_pool[sid] = session
-                    await session.start(prewarm=True)
+                await session.start(prewarm=True)
+                startup_status[f"agy_{label.lower()}_ready"] = True
                 print(f"[Startup] {label} model ready!", flush=True)
             except Exception as e:
                 print(f"[Startup] {label} pre-warm notice: {e}", flush=True)
 
-        await asyncio.gather(
-            warm_one("local-flash", "flash", "Flash"),
-            warm_one("local-pro", "pro", "Pro"),
-        )
+        await warm_one("local-flash", "flash", "Flash")
 
-    asyncio.create_task(warm_ai_sessions())
-    print("[Startup] Server ready to accept HTTP traffic!", flush=True)
+    await warm_ai_sessions()
+    startup_status["ready"] = all(
+        startup_status[key]
+        for key in ("text_indexes_warmed", "agy_flash_ready")
+    )
+    if startup_status["ready"]:
+        print("[Startup] All search and AI components are ready!", flush=True)
+    else:
+        print(
+            f"[Startup] Search is ready; AI pre-warm is degraded: {startup_status}",
+            flush=True,
+        )
 
 
 @app.get("/")
@@ -122,10 +144,16 @@ def read_root():
     }
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
+
+
 @app.get("/api/v1/health")
 def health_check():
     return {
-        "status": "healthy",
+        "status": "healthy" if startup_status["ready"] else "degraded",
+        "startup": startup_status,
         "supabase_connected": supabase_svc.is_configured,
         "database_connected": DB_PATH.exists(),
         "vector_matrix_loaded": CONSOLIDATED_VECTORS_PATH.exists(),
@@ -191,8 +219,6 @@ def get_supabase_video_frames(video_id: str, limit: int = Query(500, ge=1, le=20
 import asyncio
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
-from fastapi.responses import Response
-
 # Limit concurrent Google Drive requests to prevent 403 Rate Limits and thread blocking
 drive_semaphore = asyncio.Semaphore(8)
 drive_executor = ThreadPoolExecutor(max_workers=8)
@@ -290,14 +316,12 @@ async def search_by_image(file: UploadFile = File(...), top_k: int = Form(50), v
 
 @app.post("/api/v1/chat")
 async def chat_endpoint(req: ChatRequest):
-    # Model Routing Logic
-    is_complex = is_complex_visual_query(req.message)
-    
-    # Force use pre-warmed routed session instead of frontend's static ID
-    sid = "local-pro" if is_complex else "local-flash"
+    # Use the lowest-token model for every request. Retrieval and temporal
+    # verification provide the evidence instead of spending extra reasoning tokens.
+    sid = "local-flash"
     
     if sid not in session_pool:
-        session = AgySession(sid, model="pro" if is_complex else "flash")
+        session = AgySession(sid, model="flash")
         session_pool[sid] = session
     else:
         session = session_pool[sid]
@@ -314,6 +338,9 @@ async def chat_endpoint(req: ChatRequest):
 @app.post("/api/v1/search")
 def search_keyframes(req: SearchRequest):
     import time
+    request_start = time.perf_counter()
+    request_id = uuid.uuid4().hex[:12]
+    telemetry = {"request_id": request_id, "mode": req.mode, "top_k": req.top_k}
     start_time = time.time()
     
     if not req.query.strip():
@@ -330,18 +357,21 @@ def search_keyframes(req: SearchRequest):
         except Exception as e:
             print(f"[FastTranslator] Translation warning: {e}", flush=True)
 
+    dispatch_start = time.perf_counter()
     if req.mode == "ocr":
         results = search_engine.exact_ocr_search(
             query_text=req.query,
             top_k=req.top_k,
-            video_id_filter=req.video_id
+            video_id_filter=req.video_id,
+            telemetry=telemetry,
         )
         print(f"[Search API] OCR search took {time.time() - start_time:.3f}s", flush=True)
     elif req.mode == "asr":
         results = search_engine.exact_asr_search(
             query_text=req.query,
             top_k=req.top_k,
-            video_id_filter=req.video_id
+            video_id_filter=req.video_id,
+            telemetry=telemetry,
         )
         print(f"[Search API] ASR search took {time.time() - start_time:.3f}s", flush=True)
     else:
@@ -351,43 +381,33 @@ def search_keyframes(req: SearchRequest):
             video_id_filter=req.video_id
         )
 
-    return {
+    search_done = time.perf_counter()
+    telemetry["search_ms"] = round((search_done - dispatch_start) * 1000, 3)
+    telemetry["handler_before_serialize_ms"] = round((search_done - request_start) * 1000, 3)
+    payload = {
         "query": req.query,
         "mode": req.mode,
         "total_results": len(results),
-        "results": results
+        "results": results,
+        "telemetry": telemetry,
     }
-
-def _search_one_mode(query: str, mode: str, top_k: int, video_id: Optional[str]):
-    """Run one independent retrieval branch for the all-modes endpoint."""
-    if mode == "semantic":
-        return search_engine.search(query_text=query, top_k=top_k, video_id_filter=video_id)
-    if mode == "ocr":
-        return search_engine.exact_ocr_search(query, top_k=top_k, video_id_filter=video_id)
-    return search_engine.exact_asr_search(query, top_k=top_k, video_id_filter=video_id)
-
-@app.post("/api/v1/search/all")
-async def search_all_modes(req: SearchAllRequest):
-    """Search CLIP, OCR and ASR concurrently; the UI renders each branch separately."""
-    import asyncio
-    if not req.query.strip():
-        raise HTTPException(status_code=400, detail="Query string cannot be empty")
-
-    async def run(mode: str):
-        started = time.perf_counter()
-        results = await asyncio.to_thread(
-            _search_one_mode, req.query, mode, req.top_k, req.video_id
-        )
-        return mode, {
-            "status": "complete",
-            "elapsed_ms": round((time.perf_counter() - started) * 1000),
-            "total_results": len(results),
-            "results": results,
-        }
-
-    branches = await asyncio.gather(*(run(mode) for mode in ("semantic", "ocr", "asr")))
-    return {"query": req.query, "results": dict(branches)}
-
+    serialize_start = time.perf_counter()
+    response = JSONResponse(content=payload)
+    serialize_done = time.perf_counter()
+    telemetry["serialize_ms"] = round((serialize_done - serialize_start) * 1000, 3)
+    telemetry["response_bytes"] = len(response.body)
+    # Rebuild once so the telemetry added after the first serialization is visible to clients.
+    payload["telemetry"] = telemetry
+    response = JSONResponse(content=payload)
+    response.headers["Server-Timing"] = (
+        f"search;dur={(search_done - dispatch_start) * 1000:.2f},"
+        f"handler;dur={(search_done - request_start) * 1000:.2f}"
+    )
+    response.headers["X-Search-Results"] = str(len(results))
+    response.headers["X-Search-Mode"] = req.mode
+    response.headers["X-Request-ID"] = request_id
+    print(f"[SearchTelemetry] {json.dumps(telemetry, ensure_ascii=False)}", flush=True)
+    return response
 
 if __name__ == "__main__":
     import uvicorn
